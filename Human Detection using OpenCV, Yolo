@@ -1,0 +1,561 @@
+
+# ============================================================
+# 🧍 HUMAN DETECTION USING YOLO + OPENCV
+# COMPLETE GOOGLE COLAB - SINGLE CELL
+# ============================================================
+
+# ---------------- INSTALL ----------------
+
+!pip install -q ultralytics opencv-python-headless pyyaml tqdm
+
+# ---------------- IMPORTS ----------------
+
+import os
+import cv2
+import yaml
+import zipfile
+import random
+import shutil
+import numpy as np
+import matplotlib.pyplot as plt
+
+from pathlib import Path
+from tqdm.auto import tqdm
+from PIL import Image
+
+import torch
+from ultralytics import YOLO
+from google.colab import files
+from IPython.display import display, Video
+
+# ============================================================
+# STEP 1 : GPU CHECK
+# ============================================================
+
+print("="*65)
+print(" HUMAN DETECTION USING YOLO + OPENCV ")
+print("="*65)
+
+DEVICE = 0 if torch.cuda.is_available() else "cpu"
+
+print("CUDA Available :", torch.cuda.is_available())
+
+if torch.cuda.is_available():
+    print("GPU :", torch.cuda.get_device_name(0))
+else:
+    print("Using CPU")
+
+# ============================================================
+# STEP 2 : UPLOAD ZIP
+# ============================================================
+
+print("\nUpload your ZIP dataset")
+
+uploaded = files.upload()
+
+zip_files = [f for f in uploaded.keys() if f.endswith(".zip")]
+
+if len(zip_files) == 0:
+    raise Exception("Please upload ZIP file")
+
+ZIP_PATH = zip_files[0]
+
+print("ZIP FILE :", ZIP_PATH)
+
+# ============================================================
+# STEP 3 : PATHS
+# ============================================================
+
+PROJECT = "/content/HumanDetection"
+
+EXTRACT = PROJECT + "/dataset"
+
+YOLO_DATASET = PROJECT + "/YOLODataset"
+
+TRAIN_IMG = YOLO_DATASET + "/images/train"
+VAL_IMG   = YOLO_DATASET + "/images/val"
+
+TRAIN_LBL = YOLO_DATASET + "/labels/train"
+VAL_LBL   = YOLO_DATASET + "/labels/val"
+
+RUNS = PROJECT + "/runs"
+
+os.makedirs(PROJECT,exist_ok=True)
+
+# ============================================================
+# STEP 4 : EXTRACT ZIP
+# ============================================================
+
+if os.path.exists(EXTRACT):
+    shutil.rmtree(EXTRACT)
+
+os.makedirs(EXTRACT)
+
+print("\nExtracting ZIP...")
+
+with zipfile.ZipFile(ZIP_PATH,"r") as z:
+    z.extractall(EXTRACT)
+
+print("Extraction Completed")
+
+# ============================================================
+# STEP 5 : FIND ALL IMAGES
+# ============================================================
+
+extensions=["*.jpg","*.jpeg","*.png","*.bmp","*.webp"]
+
+images=[]
+
+for ext in extensions:
+    images.extend(Path(EXTRACT).rglob(ext))
+
+images=sorted(images)
+
+print("\nTotal Images :",len(images))
+
+if len(images)==0:
+    raise Exception("No images found")
+
+# ============================================================
+# STEP 6 : CLASS DISTRIBUTION
+# ============================================================
+
+counts={}
+
+for img in images:
+    parent=img.parent.name
+    counts[parent]=counts.get(parent,0)+1
+
+print("\nDataset Distribution")
+
+for k,v in counts.items():
+    print(k,"=",v)
+
+# ============================================================
+# STEP 7 : LOAD PRETRAINED YOLO
+# ============================================================
+
+print("\nLoading YOLO11...")
+
+base_model=YOLO("yolo11n.pt")
+
+print("YOLO Loaded Successfully")
+
+# ============================================================
+# STEP 8 : CREATE YOLO FOLDERS
+# ============================================================
+
+if os.path.exists(YOLO_DATASET):
+    shutil.rmtree(YOLO_DATASET)
+
+os.makedirs(TRAIN_IMG)
+os.makedirs(VAL_IMG)
+os.makedirs(TRAIN_LBL)
+os.makedirs(VAL_LBL)
+
+# ============================================================
+# STEP 9 : TRAIN VALID SPLIT
+# ============================================================
+
+random.seed(42)
+
+random.shuffle(images)
+
+split=int(len(images)*0.8)
+
+train_files=images[:split]
+
+val_files=images[split:]
+
+print("\nTraining Images :",len(train_files))
+print("Validation Images :",len(val_files))
+
+# ============================================================
+# STEP 10 : CREATE YOLO LABEL FUNCTION
+# ============================================================
+
+def create_label(img_path,img_out,lbl_out):
+
+    image=cv2.imread(str(img_path))
+
+    if image is None:
+        return 0
+
+    h,w=image.shape[:2]
+
+    results=base_model.predict(
+        source=image,
+        conf=0.35,
+        imgsz=640,
+        verbose=False,
+        device=DEVICE
+    )
+
+    result=results[0]
+
+    lines=[]
+
+    if result.boxes is not None:
+
+        for box in result.boxes:
+
+            cls=int(box.cls[0])
+
+            if cls!=0:
+                continue
+
+            x1,y1,x2,y2=box.xyxy[0].cpu().numpy()
+
+            x1=max(0,min(x1,w))
+            y1=max(0,min(y1,h))
+            x2=max(0,min(x2,w))
+            y2=max(0,min(y2,h))
+
+            bw=x2-x1
+            bh=y2-y1
+
+            if bw<2 or bh<2:
+                continue
+
+            xc=((x1+x2)/2)/w
+            yc=((y1+y2)/2)/h
+
+            nw=bw/w
+            nh=bh/h
+
+            lines.append(
+                f"0 {xc:.6f} {yc:.6f} {nw:.6f} {nh:.6f}"
+            )
+
+    shutil.copy2(
+        str(img_path),
+        os.path.join(img_out,img_path.name)
+    )
+
+    label=os.path.join(
+        lbl_out,
+        img_path.stem+".txt"
+    )
+
+    with open(label,"w") as f:
+        f.write("\n".join(lines))
+
+    return len(lines)
+
+# ============================================================
+# STEP 11 : GENERATE TRAIN LABELS
+# ============================================================
+
+print("\nGenerating Training Labels...")
+
+train_boxes=0
+
+for img in tqdm(train_files):
+    train_boxes+=create_label(
+        img,
+        TRAIN_IMG,
+        TRAIN_LBL
+    )
+
+print("Training Boxes :",train_boxes)
+
+# ============================================================
+# STEP 12 : GENERATE VALIDATION LABELS
+# ============================================================
+
+print("\nGenerating Validation Labels...")
+
+val_boxes=0
+
+for img in tqdm(val_files):
+    val_boxes+=create_label(
+        img,
+        VAL_IMG,
+        VAL_LBL
+    )
+
+print("Validation Boxes :",val_boxes)
+
+# ============================================================
+# STEP 13 : DATA YAML
+# ============================================================
+
+yaml_data={
+    "path":YOLO_DATASET,
+    "train":"images/train",
+    "val":"images/val",
+    "names":{
+        0:"person"
+    }
+}
+
+DATA_YAML=YOLO_DATASET+"/data.yaml"
+
+with open(DATA_YAML,"w") as f:
+    yaml.dump(yaml_data,f)
+
+print("\nDATA YAML CREATED")
+
+print(open(DATA_YAML).read())
+
+# ============================================================
+# STEP 14 : SHOW SAMPLE LABEL
+# ============================================================
+
+sample=random.choice(train_files)
+
+img=cv2.imread(str(sample))
+
+img=cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+
+h,w=img.shape[:2]
+
+label_file=Path(TRAIN_LBL)/(sample.stem+".txt")
+
+if label_file.exists():
+
+    with open(label_file) as f:
+        labels=f.readlines()
+
+    for line in labels:
+
+        p=line.split()
+
+        _,xc,yc,bw,bh=map(float,p)
+
+        x1=int((xc-bw/2)*w)
+        y1=int((yc-bh/2)*h)
+
+        x2=int((xc+bw/2)*w)
+        y2=int((yc+bh/2)*h)
+
+        cv2.rectangle(
+            img,
+            (x1,y1),
+            (x2,y2),
+            (255,0,0),
+            3
+        )
+
+plt.figure(figsize=(10,8))
+
+plt.imshow(img)
+
+plt.axis("off")
+
+plt.title("Generated Human Bounding Box")
+
+plt.show()
+
+# ============================================================
+# STEP 15 : TRAIN YOLO
+# ============================================================
+
+print("\nStarting Training...")
+
+model=YOLO("yolo11n.pt")
+
+model.train(
+
+    data=DATA_YAML,
+
+    epochs=30,
+
+    imgsz=640,
+
+    batch=16,
+
+    device=DEVICE,
+
+    workers=2,
+
+    project=RUNS,
+
+    name="human_detector",
+
+    pretrained=True,
+
+    patience=10,
+
+    verbose=True
+
+)
+
+# ============================================================
+# STEP 16 : LOAD BEST MODEL
+# ============================================================
+
+BEST_MODEL=RUNS+"/human_detector/weights/best.pt"
+
+if not os.path.exists(BEST_MODEL):
+    raise Exception("best.pt not found")
+
+human_model=YOLO(BEST_MODEL)
+
+print("\nBest Model Loaded")
+
+# ============================================================
+# STEP 17 : VALIDATE
+# ============================================================
+
+print("\nValidating Model...")
+
+metrics=human_model.val(
+    data=DATA_YAML,
+    imgsz=640,
+    device=DEVICE
+)
+
+print("\nValidation Completed")
+
+try:
+
+    print("mAP50 :",metrics.box.map50)
+
+    print("mAP50-95 :",metrics.box.map)
+
+    print("Precision :",metrics.box.mp)
+
+    print("Recall :",metrics.box.mr)
+
+except:
+    pass
+
+# ============================================================
+# STEP 18 : IMAGE DETECTION
+# ============================================================
+
+print("\nUpload Image For Testing")
+
+uploaded_img=files.upload()
+
+if len(uploaded_img)>0:
+
+    TEST_IMG=list(uploaded_img.keys())[0]
+
+    results=human_model.predict(
+        source=TEST_IMG,
+        conf=0.35,
+        imgsz=640,
+        verbose=False
+    )
+
+    result=results[0]
+
+    annotated=result.plot()
+
+    count=len(result.boxes) if result.boxes is not None else 0
+
+    cv2.putText(
+        annotated,
+        f"Humans : {count}",
+        (20,50),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.2,
+        (0,255,0),
+        3
+    )
+
+    annotated=cv2.cvtColor(
+        annotated,
+        cv2.COLOR_BGR2RGB
+    )
+
+    print("Humans Detected :",count)
+
+    display(Image.fromarray(annotated))
+
+# ============================================================
+# STEP 19 : VIDEO DETECTION
+# ============================================================
+
+print("\nUpload Video For Human Detection")
+
+uploaded_video=files.upload()
+
+if len(uploaded_video)>0:
+
+    VIDEO=list(uploaded_video.keys())[0]
+
+    OUTPUT=PROJECT+"/human_detection_output.mp4"
+
+    cap=cv2.VideoCapture(VIDEO)
+
+    fps=cap.get(cv2.CAP_PROP_FPS)
+
+    if fps<=0:
+        fps=25
+
+    width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    fourcc=cv2.VideoWriter_fourcc(*"mp4v")
+
+    writer=cv2.VideoWriter(
+        OUTPUT,
+        fourcc,
+        fps,
+        (width,height)
+    )
+
+    print("Processing Video...")
+
+    while True:
+
+        ret,frame=cap.read()
+
+        if not ret:
+            break
+
+        results=human_model.predict(
+            source=frame,
+            conf=0.35,
+            imgsz=640,
+            verbose=False
+        )
+
+        result=results[0]
+
+        annotated=result.plot()
+
+        count=len(result.boxes) if result.boxes is not None else 0
+
+        cv2.rectangle(
+            annotated,
+            (10,10),
+            (300,65),
+            (0,0,0),
+            -1
+        )
+
+        cv2.putText(
+            annotated,
+            f"Humans : {count}",
+            (20,50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0,255,0),
+            3
+        )
+
+        writer.write(annotated)
+
+    cap.release()
+
+    writer.release()
+
+    print("\nVideo Completed")
+
+    display(Video(OUTPUT,embed=True,width=850))
+
+# ============================================================
+# STEP 20 : DOWNLOAD BEST MODEL
+# ============================================================
+
+print("\nTraining Finished Successfully")
+
+print("Best Model Path")
+
+print(BEST_MODEL)
+
+files.download(BEST_MODEL)
