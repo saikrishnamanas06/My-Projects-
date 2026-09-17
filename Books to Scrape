@@ -1,0 +1,1076 @@
+# ============================================================
+# COMPLETE WEB SCRAPING + STREAMLIT PROJECT
+# GOOGLE COLAB
+#
+# Requests
+# BeautifulSoup
+# Pandas
+# Streamlit
+# Cloudflare Tunnel
+#
+# Target:
+# https://books.toscrape.com/
+# ============================================================
+
+
+# ============================================================
+# 1. INSTALL PYTHON PACKAGES
+# ============================================================
+
+!pip -q install requests beautifulsoup4 pandas lxml streamlit
+
+
+# ============================================================
+# 2. DOWNLOAD CLOUDFLARED
+# ============================================================
+
+!wget -q -O cloudflared \
+    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+!chmod +x cloudflared
+
+print("✅ Cloudflare Tunnel installed")
+
+
+# ============================================================
+# 3. STOP OLD PROCESSES
+# ============================================================
+
+!pkill -f streamlit || true
+!pkill -f cloudflared || true
+
+print("✅ Old processes cleared")
+
+
+# ============================================================
+# 4. CREATE STREAMLIT APP
+# ============================================================
+
+app_code = r'''
+
+import streamlit as st
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+from urllib.parse import urljoin
+import time
+
+
+# ============================================================
+# STREAMLIT CONFIGURATION
+# ============================================================
+
+st.set_page_config(
+    page_title="Web Scraping Analytics",
+    page_icon="🌐",
+    layout="wide"
+)
+
+
+# ============================================================
+# CUSTOM CSS
+# ============================================================
+
+st.markdown("""
+<style>
+
+.main-title {
+    font-size: 42px;
+    font-weight: 700;
+    margin-bottom: 5px;
+}
+
+.subtitle {
+    font-size: 18px;
+    color: #666;
+    margin-bottom: 20px;
+}
+
+.metric-box {
+    padding: 10px;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.markdown(
+    '<div class="main-title">🌐 Web Scraping Analytics Dashboard</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'Python • Requests • BeautifulSoup • Pandas • Streamlit'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+st.divider()
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.header("⚙️ Scraping Configuration")
+
+website_url = st.sidebar.text_input(
+    "Website URL",
+    value="https://books.toscrape.com/"
+)
+
+pages = st.sidebar.slider(
+    "Pages to Scrape",
+    min_value=1,
+    max_value=50,
+    value=5
+)
+
+st.sidebar.info(
+    "For this project, use Books to Scrape. "
+    "It is designed specifically for scraping practice."
+)
+
+
+# ============================================================
+# SCRAPE FUNCTION
+# ============================================================
+
+def scrape_books(base_url, total_pages):
+
+    session = requests.Session()
+
+    session.headers.update({
+        "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/120.0 Safari/537.36"
+    })
+
+    records = []
+
+    progress = st.progress(0)
+
+    status = st.empty()
+
+    for page_number in range(1, total_pages + 1):
+
+        # ----------------------------------------------------
+        # CREATE URL
+        # ----------------------------------------------------
+
+        if page_number == 1:
+
+            page_url = base_url
+
+        else:
+
+            page_url = urljoin(
+                base_url,
+                f"catalogue/page-{page_number}.html"
+            )
+
+
+        status.info(
+            f"🔎 Scraping page "
+            f"{page_number} / {total_pages}"
+        )
+
+
+        # ----------------------------------------------------
+        # REQUEST WEBSITE
+        # ----------------------------------------------------
+
+        try:
+
+            response = session.get(
+                page_url,
+                timeout=20
+            )
+
+        except requests.exceptions.Timeout:
+
+            st.warning(
+                f"Timeout on page {page_number}"
+            )
+
+            continue
+
+        except requests.exceptions.ConnectionError:
+
+            st.warning(
+                f"Connection error on page {page_number}"
+            )
+
+            continue
+
+        except requests.exceptions.RequestException as error:
+
+            st.warning(
+                f"Request error: {error}"
+            )
+
+            continue
+
+
+        # ----------------------------------------------------
+        # HTTP STATUS
+        # ----------------------------------------------------
+
+        if response.status_code != 200:
+
+            st.warning(
+                f"Page {page_number}: "
+                f"HTTP {response.status_code}"
+            )
+
+            continue
+
+
+        # ----------------------------------------------------
+        # PARSE HTML
+        # ----------------------------------------------------
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+
+        # ----------------------------------------------------
+        # FIND PRODUCTS
+        # ----------------------------------------------------
+
+        books = soup.select(
+            "article.product_pod"
+        )
+
+
+        # ----------------------------------------------------
+        # EXTRACT DATA
+        # ----------------------------------------------------
+
+        for book in books:
+
+            # ================================================
+            # TITLE
+            # ================================================
+
+            title_element = book.select_one(
+                "h3 a"
+            )
+
+            if title_element:
+
+                title = title_element.get(
+                    "title",
+                    "Unknown"
+                ).strip()
+
+            else:
+
+                title = "Unknown"
+
+
+            # ================================================
+            # PRICE
+            # ================================================
+
+            price_element = book.select_one(
+                ".price_color"
+            )
+
+            if price_element:
+
+                price_text = price_element.get_text(
+                    strip=True
+                )
+
+            else:
+
+                price_text = "£0.00"
+
+
+            # ================================================
+            # RATING
+            # ================================================
+
+            rating_element = book.select_one(
+                "p.star-rating"
+            )
+
+            rating = 0
+
+            if rating_element:
+
+                classes = rating_element.get(
+                    "class",
+                    []
+                )
+
+                rating_map = {
+                    "One": 1,
+                    "Two": 2,
+                    "Three": 3,
+                    "Four": 4,
+                    "Five": 5
+                }
+
+                for rating_name, rating_value in (
+                    rating_map.items()
+                ):
+
+                    if rating_name in classes:
+
+                        rating = rating_value
+
+                        break
+
+
+            # ================================================
+            # AVAILABILITY
+            # ================================================
+
+            availability_element = (
+                book.select_one(
+                    ".availability"
+                )
+            )
+
+            if availability_element:
+
+                availability = (
+                    availability_element
+                    .get_text(
+                        " ",
+                        strip=True
+                    )
+                )
+
+            else:
+
+                availability = "Unknown"
+
+
+            # ================================================
+            # BOOK URL
+            # ================================================
+
+            link_element = book.select_one(
+                "h3 a"
+            )
+
+            if link_element:
+
+                relative_url = link_element.get(
+                    "href"
+                )
+
+                book_url = urljoin(
+                    page_url,
+                    relative_url
+                )
+
+            else:
+
+                book_url = ""
+
+
+            # ================================================
+            # STORE RECORD
+            # ================================================
+
+            records.append({
+
+                "Title": title,
+
+                "Price": price_text,
+
+                "Rating": rating,
+
+                "Availability": availability,
+
+                "URL": book_url
+
+            })
+
+
+        # ----------------------------------------------------
+        # PROGRESS
+        # ----------------------------------------------------
+
+        progress.progress(
+            page_number / total_pages
+        )
+
+
+        # ----------------------------------------------------
+        # POLITE DELAY
+        # ----------------------------------------------------
+
+        time.sleep(0.5)
+
+
+    progress.empty()
+
+    status.success(
+        "✅ Scraping completed!"
+    )
+
+    return pd.DataFrame(records)
+
+
+# ============================================================
+# SCRAPE BUTTON
+# ============================================================
+
+if st.sidebar.button(
+    "🚀 START SCRAPING",
+    use_container_width=True
+):
+
+    # --------------------------------------------------------
+    # VALIDATE URL
+    # --------------------------------------------------------
+
+    if not website_url.startswith(
+        ("http://", "https://")
+    ):
+
+        st.error(
+            "Please enter a valid URL."
+        )
+
+        st.stop()
+
+
+    # --------------------------------------------------------
+    # START SCRAPING
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Scraping website..."
+    ):
+
+        df = scrape_books(
+            website_url,
+            pages
+        )
+
+
+    # --------------------------------------------------------
+    # CHECK RESULT
+    # --------------------------------------------------------
+
+    if df.empty:
+
+        st.error(
+            "No data was found."
+        )
+
+        st.stop()
+
+
+    # ========================================================
+    # DATA CLEANING
+    # ========================================================
+
+    # Remove duplicates
+
+    df = df.drop_duplicates(
+        subset=["Title"]
+    )
+
+
+    # --------------------------------------------------------
+    # PRICE
+    # --------------------------------------------------------
+
+    df["Price"] = (
+        df["Price"]
+        .astype(str)
+        .str.replace(
+            "£",
+            "",
+            regex=False
+        )
+        .str.strip()
+    )
+
+    df["Price"] = pd.to_numeric(
+        df["Price"],
+        errors="coerce"
+    )
+
+
+    # --------------------------------------------------------
+    # RATING
+    # --------------------------------------------------------
+
+    df["Rating"] = pd.to_numeric(
+        df["Rating"],
+        errors="coerce"
+    )
+
+
+    # --------------------------------------------------------
+    # MISSING VALUES
+    # --------------------------------------------------------
+
+    df["Price"] = df["Price"].fillna(0)
+
+    df["Rating"] = df["Rating"].fillna(0)
+
+
+    # --------------------------------------------------------
+    # RESET INDEX
+    # --------------------------------------------------------
+
+    df = df.reset_index(
+        drop=True
+    )
+
+
+    # --------------------------------------------------------
+    # STORE DATA
+    # --------------------------------------------------------
+
+    st.session_state["df"] = df
+
+
+# ============================================================
+# DISPLAY RESULTS
+# ============================================================
+
+if "df" in st.session_state:
+
+    df = st.session_state["df"]
+
+
+    # ========================================================
+    # SUCCESS
+    # ========================================================
+
+    st.success(
+        f"🎉 Successfully scraped "
+        f"{len(df)} books!"
+    )
+
+
+    # ========================================================
+    # KPI CARDS
+    # ========================================================
+
+    col1, col2, col3, col4 = st.columns(4)
+
+
+    with col1:
+
+        st.metric(
+            "📚 Total Books",
+            len(df)
+        )
+
+
+    with col2:
+
+        st.metric(
+            "💰 Average Price",
+            f"£{df['Price'].mean():.2f}"
+        )
+
+
+    with col3:
+
+        st.metric(
+            "⭐ Average Rating",
+            f"{df['Rating'].mean():.2f}"
+        )
+
+
+    with col4:
+
+        st.metric(
+            "💎 Highest Price",
+            f"£{df['Price'].max():.2f}"
+        )
+
+
+    st.divider()
+
+
+    # ========================================================
+    # SEARCH
+    # ========================================================
+
+    st.subheader("🔍 Search Books")
+
+    search_text = st.text_input(
+        "Search by title",
+        placeholder="Example: Python..."
+    )
+
+
+    if search_text:
+
+        filtered_df = df[
+            df["Title"]
+            .str.contains(
+                search_text,
+                case=False,
+                na=False
+            )
+        ]
+
+    else:
+
+        filtered_df = df
+
+
+    st.write(
+        f"Showing {len(filtered_df)} records"
+    )
+
+
+    # ========================================================
+    # DATA TABLE
+    # ========================================================
+
+    st.subheader(
+        "📊 Scraped Dataset"
+    )
+
+    st.dataframe(
+        filtered_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+
+            "URL": st.column_config.LinkColumn(
+                "Book URL"
+            ),
+
+            "Price": st.column_config.NumberColumn(
+                "Price (£)",
+                format="£%.2f"
+            ),
+
+            "Rating": st.column_config.NumberColumn(
+                "Rating",
+                format="%d ⭐"
+            )
+
+        }
+    )
+
+
+    # ========================================================
+    # PRICE ANALYSIS
+    # ========================================================
+
+    st.subheader(
+        "📈 Price Analysis"
+    )
+
+
+    expensive = (
+        df
+        .sort_values(
+            "Price",
+            ascending=False
+        )
+        .head(10)
+    )
+
+
+    st.bar_chart(
+        expensive.set_index(
+            "Title"
+        )["Price"]
+    )
+
+
+    # ========================================================
+    # RATING ANALYSIS
+    # ========================================================
+
+    st.subheader(
+        "⭐ Rating Distribution"
+    )
+
+
+    rating_data = (
+        df["Rating"]
+        .value_counts()
+        .sort_index()
+    )
+
+
+    st.bar_chart(
+        rating_data
+    )
+
+
+    # ========================================================
+    # PRICE STATISTICS
+    # ========================================================
+
+    st.subheader(
+        "📊 Price Statistics"
+    )
+
+
+    statistics = pd.DataFrame({
+
+        "Metric": [
+            "Minimum Price",
+            "Maximum Price",
+            "Average Price",
+            "Median Price"
+        ],
+
+        "Value (£)": [
+
+            df["Price"].min(),
+
+            df["Price"].max(),
+
+            df["Price"].mean(),
+
+            df["Price"].median()
+
+        ]
+
+    })
+
+
+    st.dataframe(
+        statistics,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+    # ========================================================
+    # TOP BOOKS
+    # ========================================================
+
+    st.subheader(
+        "🏆 Top 10 Most Expensive Books"
+    )
+
+
+    top_books = (
+        df
+        .sort_values(
+            "Price",
+            ascending=False
+        )
+        .head(10)
+        [["Title", "Price", "Rating", "Availability"]]
+    )
+
+
+    st.dataframe(
+        top_books,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+    # ========================================================
+    # DOWNLOAD CSV
+    # ========================================================
+
+    st.subheader(
+        "📥 Download Dataset"
+    )
+
+
+    csv_data = df.to_csv(
+        index=False
+    ).encode(
+        "utf-8"
+    )
+
+
+    st.download_button(
+        label="📥 Download CSV",
+        data=csv_data,
+        file_name="books_scraped_data.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+
+    # ========================================================
+    # TARGET WEBSITE
+    # ========================================================
+
+    st.divider()
+
+    st.subheader(
+        "🌐 Target Website"
+    )
+
+
+    st.link_button(
+        "Open Books to Scrape",
+        website_url,
+        use_container_width=True
+    )
+
+
+else:
+
+    # ========================================================
+    # INITIAL SCREEN
+    # ========================================================
+
+    st.info(
+        "👈 Configure the website in the sidebar "
+        "and click **START SCRAPING**."
+    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "Web Scraping Analytics Project | "
+    "Python + Requests + BeautifulSoup + Pandas + Streamlit"
+)
+
+'''
+
+
+# ============================================================
+# 5. WRITE APP.PY
+# ============================================================
+
+with open(
+    "app.py",
+    "w",
+    encoding="utf-8"
+) as f:
+
+    f.write(app_code)
+
+
+print("✅ app.py created")
+
+
+# ============================================================
+# 6. START STREAMLIT
+# ============================================================
+
+streamlit_log = open(
+    "streamlit.log",
+    "w"
+)
+
+
+streamlit_process = subprocess.Popen(
+    [
+        "streamlit",
+        "run",
+        "app.py",
+
+        "--server.port=8501",
+
+        "--server.address=0.0.0.0",
+
+        "--server.headless=true",
+
+        "--server.enableCORS=false",
+
+        "--server.enableXsrfProtection=false",
+
+        "--browser.gatherUsageStats=false"
+    ],
+
+    stdout=streamlit_log,
+
+    stderr=subprocess.STDOUT
+)
+
+
+print("⏳ Starting Streamlit...")
+
+time.sleep(10)
+
+
+# ============================================================
+# 7. VERIFY STREAMLIT
+# ============================================================
+
+import requests
+
+try:
+
+    test_response = requests.get(
+        "http://127.0.0.1:8501",
+        timeout=10
+    )
+
+
+    print(
+        "Streamlit HTTP status:",
+        test_response.status_code
+    )
+
+
+    if test_response.status_code == 200:
+
+        print(
+            "✅ Streamlit is working correctly!"
+        )
+
+    else:
+
+        print(
+            "❌ Streamlit returned:",
+            test_response.status_code
+        )
+
+
+except Exception as error:
+
+    print(
+        "❌ Streamlit did not start."
+    )
+
+    print(
+        error
+    )
+
+
+    print(
+        "\n========== STREAMLIT LOG =========="
+    )
+
+    streamlit_log.flush()
+
+    with open(
+        "streamlit.log",
+        "r"
+    ) as log_file:
+
+        print(
+            log_file.read()
+        )
+
+
+# ============================================================
+# 8. START CLOUDFLARE TUNNEL
+# ============================================================
+
+print()
+print("⏳ Creating public URL...")
+
+
+cloudflare_process = subprocess.Popen(
+    [
+        "./cloudflared",
+        "tunnel",
+        "--url",
+        "http://127.0.0.1:8501"
+    ],
+
+    stdout=subprocess.PIPE,
+
+    stderr=subprocess.STDOUT,
+
+    text=True
+)
+
+
+# ============================================================
+# 9. FIND CLOUDFLARE URL
+# ============================================================
+
+public_url = None
+
+
+for _ in range(40):
+
+    line = cloudflare_process.stdout.readline()
+
+
+    if line:
+
+        line = line.strip()
+
+        print(line)
+
+
+        if "trycloudflare.com" in line:
+
+            parts = line.split()
+
+            for part in parts:
+
+                if (
+                    part.startswith("https://")
+                    and
+                    "trycloudflare.com" in part
+                ):
+
+                    public_url = part
+
+                    break
+
+
+        if public_url:
+
+            break
+
+
+    time.sleep(1)
+
+
+# ============================================================
+# 10. FINAL OUTPUT
+# ============================================================
+
+print()
+print("=" * 70)
+print("🎉 WEB SCRAPING STREAMLIT PROJECT READY")
+print("=" * 70)
+
+
+if public_url:
+
+    print()
+    print("🌐 OPEN THIS URL:")
+    print()
+    print(public_url)
+    print()
+
+    print(
+        "Keep this Colab notebook running."
+    )
+
+else:
+
+    print()
+    print(
+        "⚠️ Public URL was not detected."
+    )
+
+    print(
+        "Check the Cloudflare output above."
+    )
+
+
+print()
+print("=" * 70)
