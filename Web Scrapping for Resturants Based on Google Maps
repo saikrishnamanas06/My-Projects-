@@ -1,0 +1,1627 @@
+import re
+import time
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+# ============================================================
+# 🍽️ RESTAURANT FINDER - GOOGLE COLAB
+# 🚫 NO GOOGLE API KEY
+# 🤖 SELENIUM + GOOGLE MAPS WEBSITE
+# ============================================================
+
+!pip -q install selenium ipyleaflet openpyxl pandas beautifulsoup4
+
+# ------------------------------------------------------------
+# 1. INSTALL GOOGLE CHROME
+# ------------------------------------------------------------
+
+import os
+import subprocess
+import sys
+
+CHROME_PATH = "/usr/bin/google-chrome"
+
+if not os.path.exists(CHROME_PATH):
+
+    print("Installing Google Chrome...")
+
+    subprocess.run(
+        "wget -q https://dl.google.com/linux/direct/"
+        "google-chrome-stable_current_amd64.deb",
+        shell=True,
+        check=True
+    )
+
+    subprocess.run(
+        "apt-get update -qq",
+        shell=True,
+        check=True
+    )
+
+    subprocess.run(
+        "apt-get install -y ./google-chrome-stable_current_amd64.deb",
+        shell=True,
+        check=True
+    )
+
+print("✅ Google Chrome ready")
+
+
+# ------------------------------------------------------------
+# 2. IMPORTS
+# ------------------------------------------------------------
+
+import re
+import time
+import threading
+import pandas as pd
+
+from IPython.display import display, HTML, clear_output
+
+from ipyleaflet import (
+    Map,
+    Marker,
+    TileLayer,
+    Popup
+)
+
+from ipywidgets import (
+    HTML as WidgetHTML,
+    Button,
+    Output
+)
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+
+# ============================================================
+# 3. GLOBAL VARIABLES
+# ============================================================
+
+selected_lat = None
+selected_lon = None
+
+location_locked = False
+scraping_running = False
+
+selected_marker = None
+
+restaurant_markers = []
+
+restaurants = []
+
+search_lock = threading.Lock()
+
+
+# ============================================================
+# 4. CREATE MAP
+# ============================================================
+
+esri_tiles = TileLayer(
+    url=(
+        "https://server.arcgisonline.com/"
+        "ArcGIS/rest/services/"
+        "World_Street_Map/"
+        "MapServer/tile/{z}/{y}/{x}"
+    ),
+    attribution="Tiles © Esri"
+)
+
+restaurant_map = Map(
+    center=(17.444171, 78.461396),
+    zoom=14,
+    scroll_wheel_zoom=True
+)
+
+restaurant_map.add_layer(esri_tiles)
+
+restaurant_map.layout.width = "100%"
+restaurant_map.layout.height = "650px"
+
+
+# ============================================================
+# 5. OUTPUT AREA
+# ============================================================
+
+status_output = Output()
+
+display(HTML("""
+<h2>🗺️ RESTAURANT FINDER</h2>
+
+<p>
+<b>Instructions:</b>
+</p>
+
+<ul>
+<li>Click ONE location on the map.</li>
+<li>The location will be locked.</li>
+<li>Google Maps will open at that exact coordinate.</li>
+<li>The system automatically searches for restaurants nearby.</li>
+<li>Restaurant information will appear below.</li>
+</ul>
+
+<hr>
+"""))
+
+display(restaurant_map)
+
+display(status_output)
+
+
+# ============================================================
+# 6. GOOGLE MAPS URL
+# ============================================================
+
+def create_google_maps_url(lat, lon):
+
+    return (
+        "https://www.google.com/maps/search/"
+        f"?api=1&query={lat},{lon}"
+    )
+
+
+# ============================================================
+# 7. CLICK LOCATION
+# ============================================================
+
+def handle_map_click(**kwargs):
+
+    global selected_lat
+    global selected_lon
+    global location_locked
+    global selected_marker
+    global scraping_running
+
+    if kwargs.get("type") != "click":
+        return
+
+    # Prevent another selection
+    if location_locked:
+        return
+
+    coordinates = kwargs.get("coordinates")
+
+    if not coordinates:
+        return
+
+    selected_lat = float(coordinates[0])
+    selected_lon = float(coordinates[1])
+
+    location_locked = True
+
+    # --------------------------------------------------------
+    # ADD SELECTED LOCATION MARKER
+    # --------------------------------------------------------
+
+    selected_marker = Marker(
+        location=(selected_lat, selected_lon),
+        draggable=False
+    )
+
+    restaurant_map.add_layer(selected_marker)
+
+    # --------------------------------------------------------
+    # STOP FURTHER LOCATION SELECTION
+    # --------------------------------------------------------
+
+    restaurant_map.scroll_wheel_zoom = False
+
+    # --------------------------------------------------------
+    # SHOW LOCATION
+    # --------------------------------------------------------
+
+    google_url = create_google_maps_url(
+        selected_lat,
+        selected_lon
+    )
+
+    with status_output:
+
+        clear_output(wait=True)
+
+        display(HTML(f"""
+        <div style="
+            background:#e8f5e9;
+            padding:18px;
+            border-radius:10px;
+            margin-top:15px;
+        ">
+
+        <h3>🔒 LOCATION LOCKED</h3>
+
+        <b>Latitude:</b> {selected_lat:.6f}<br>
+        <b>Longitude:</b> {selected_lon:.6f}
+
+        <br><br>
+
+        <a href="{google_url}"
+           target="_blank"
+           style="
+           background:#4285F4;
+           color:white;
+           padding:12px 18px;
+           text-decoration:none;
+           border-radius:7px;
+           font-weight:bold;
+           display:inline-block;
+           ">
+           📍 Open Exact Location in Google Maps
+        </a>
+
+        <br><br>
+
+        <b>🔎 Automatically searching for restaurants...</b>
+
+        </div>
+        """))
+
+    # --------------------------------------------------------
+    # START RESTAURANT SCRAPING
+    # --------------------------------------------------------
+
+    if not scraping_running:
+
+        scraping_running = True
+
+        thread = threading.Thread(
+            target=search_restaurants,
+            args=(selected_lat, selected_lon),
+            daemon=True
+        )
+
+        thread.start()
+
+
+# Register click
+restaurant_map.on_interaction(handle_map_click)
+
+
+# ============================================================
+# 8. CREATE SELENIUM DRIVER
+# ============================================================
+
+def create_driver():
+
+    options = webdriver.ChromeOptions()
+
+    options.binary_location = CHROME_PATH
+
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+
+    options.add_argument(
+        "--window-size=1920,1080"
+    )
+
+    options.add_argument(
+        "--lang=en-US"
+    )
+
+    options.add_argument(
+        "--disable-notifications"
+    )
+
+    options.add_argument(
+        "--disable-popup-blocking"
+    )
+
+    options.add_argument(
+        "--disable-blink-features=AutomationControlled"
+    )
+
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 "
+        "(X11; Linux x86_64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    )
+
+    driver = webdriver.Chrome(
+        options=options,
+        keep_alive=False
+    )
+
+    driver.set_page_load_timeout(60)
+
+    return driver
+
+
+# ============================================================
+# 9. CLEAN TEXT
+# ============================================================
+
+def clean_text(text):
+
+    if not text:
+        return "Not Available"
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    return text if text else "Not Available"
+
+
+# ============================================================
+# 10. SAFE FIND TEXT
+# ============================================================
+
+def get_first_text(driver, selectors):
+
+    for selector in selectors:
+
+        try:
+
+            elements = driver.find_elements(
+                By.CSS_SELECTOR,
+                selector
+            )
+
+            for element in elements:
+
+                text = clean_text(
+                    element.text
+                )
+
+                if text != "Not Available":
+
+                    return text
+
+        except:
+            pass
+
+    return "Not Available"
+
+
+# ============================================================
+# 11. EXTRACT RATING + REVIEWS
+# ============================================================
+
+def extract_rating_reviews(driver):
+
+    rating = "Not Available"
+    reviews = "Not Available"
+
+    try:
+
+        elements = driver.find_elements(
+            By.XPATH,
+            "//*[@aria-label]"
+        )
+
+        for element in elements:
+
+            label = element.get_attribute(
+                "aria-label"
+            )
+
+            if not label:
+                continue
+
+            label = clean_text(label)
+
+            # Example:
+            # 4.3 stars
+            rating_match = re.search(
+                r"(\d+(?:\.\d+)?)\s+stars?",
+                label,
+                re.I
+            )
+
+            if rating_match:
+
+                rating = rating_match.group(1)
+
+            # Example:
+            # 1,234 reviews
+            review_match = re.search(
+                r"([\d,]+)\s+reviews?",
+                label,
+                re.I
+            )
+
+            if review_match:
+
+                reviews = review_match.group(1)
+
+    except:
+        pass
+
+    return rating, reviews
+
+
+# ============================================================
+# 12. EXTRACT PHONE
+# ============================================================
+
+def extract_phone(driver):
+
+    selectors = [
+
+        "button[data-item-id^='phone']",
+
+        "button[aria-label*='Phone']",
+
+        "[data-item-id^='phone']",
+
+    ]
+
+    phone = get_first_text(
+        driver,
+        selectors
+    )
+
+    if phone != "Not Available":
+        return phone
+
+    # Regex fallback
+    try:
+
+        body = driver.find_element(
+            By.TAG_NAME,
+            "body"
+        ).text
+
+        patterns = [
+
+            r"\+91[\s\-]?\d{5}[\s\-]?\d{5}",
+
+            r"\+91[\s\-]?\d{10}",
+
+            r"\b0\d{2,4}[\s\-]?\d{6,8}\b"
+
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                body
+            )
+
+            if match:
+
+                return match.group(0)
+
+    except:
+        pass
+
+    return "Not Available"
+
+
+# ============================================================
+# 13. EXTRACT ADDRESS
+# ============================================================
+
+def extract_address(driver):
+
+    selectors = [
+
+        "button[data-item-id='address']",
+
+        "button[aria-label*='Address']",
+
+        "[data-item-id='address']"
+
+    ]
+
+    return get_first_text(
+        driver,
+        selectors
+    )
+
+
+# ============================================================
+# 14. EXTRACT CATEGORY
+# ============================================================
+
+def extract_category(driver):
+
+    selectors = [
+
+        "button.DkEaL",
+
+        "div.skqShb"
+
+    ]
+
+    return get_first_text(
+        driver,
+        selectors
+    )
+
+
+# ============================================================
+# 15. EXTRACT WEBSITE
+# ============================================================
+
+def extract_website(driver):
+
+    selectors = [
+
+        "a[data-item-id='authority']",
+
+        "a[aria-label*='Website']",
+
+        "a[aria-label*='website']"
+
+    ]
+
+    for selector in selectors:
+
+        try:
+
+            elements = driver.find_elements(
+                By.CSS_SELECTOR,
+                selector
+            )
+
+            for element in elements:
+
+                href = element.get_attribute(
+                    "href"
+                )
+
+                if href:
+
+                    return href
+
+        except:
+            pass
+
+    return "Not Available"
+
+
+# ============================================================
+# 16. EXTRACT PRICE
+# ============================================================
+
+def extract_price(driver):
+
+    try:
+
+        body = driver.find_element(
+            By.TAG_NAME,
+            "body"
+        ).text
+
+        # Indian price symbols
+        price_match = re.search(
+            r"₹{1,4}",
+            body
+        )
+
+        if price_match:
+
+            return price_match.group(0)
+
+        # Dollar fallback
+        dollar_match = re.search(
+            r"\${1,4}",
+            body
+        )
+
+        if dollar_match:
+
+            return dollar_match.group(0)
+
+    except:
+        pass
+
+    return "Not Available"
+
+
+# ============================================================
+# 17. EXTRACT OPEN/CLOSED STATUS
+# ============================================================
+
+def extract_status(driver):
+
+    try:
+
+        body = driver.find_element(
+            By.TAG_NAME,
+            "body"
+        ).text
+
+        lines = [
+            clean_text(x)
+            for x in body.split("\n")
+        ]
+
+        for line in lines:
+
+            if line.lower() == "open":
+                return "Open"
+
+            if line.lower() == "closed":
+                return "Closed"
+
+            if "temporarily closed" in line.lower():
+                return "Temporarily Closed"
+
+    except:
+        pass
+
+    return "Not Available"
+
+
+# ============================================================
+# 18. EXTRACT TIMINGS
+# ============================================================
+
+def extract_timings(driver):
+
+    try:
+
+        rows = driver.find_elements(
+            By.CSS_SELECTOR,
+            "table tr"
+        )
+
+        timings = []
+
+        for row in rows:
+
+            text = clean_text(
+                row.text
+            )
+
+            if text != "Not Available":
+
+                timings.append(text)
+
+        if timings:
+
+            return " | ".join(timings)
+
+    except:
+        pass
+
+    return "Not Available"
+
+
+# ============================================================
+# 19. EXTRACT FAMOUS FOOD
+# ============================================================
+
+def extract_famous_food(driver):
+
+    food_keywords = [
+
+        "biryani",
+        "pizza",
+        "burger",
+        "dosa",
+        "masala dosa",
+        "idli",
+        "vada",
+        "thali",
+        "fried rice",
+        "noodles",
+        "momos",
+        "shawarma",
+        "kebab",
+        "tandoori",
+        "paneer",
+        "butter chicken",
+        "chole bhature",
+        "paratha",
+        "pav bhaji",
+        "ice cream",
+        "cake",
+        "coffee",
+        "tea",
+        "sandwich",
+        "pasta",
+        "rolls",
+        "dessert"
+    ]
+
+    try:
+
+        body = driver.find_element(
+            By.TAG_NAME,
+            "body"
+        ).text.lower()
+
+        found = []
+
+        for food in food_keywords:
+
+            if food in body:
+
+                found.append(
+                    food.title()
+                )
+
+        if found:
+
+            # Remove duplicates
+            found = list(
+                dict.fromkeys(found)
+            )
+
+            return ", ".join(
+                found[:5]
+            )
+
+    except:
+        pass
+
+    return "Not Available"
+
+
+# ============================================================
+# 20. EXTRACT RESTAURANT COORDINATES
+# ============================================================
+
+def extract_coordinates(driver):
+
+    urls_to_check = [
+
+        driver.current_url,
+
+    ]
+
+    try:
+
+        urls_to_check.append(
+            driver.page_source
+        )
+
+    except:
+        pass
+
+    patterns = [
+
+        r"/@(-?\d+\.\d+),(-?\d+\.\d+)",
+
+        r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)",
+
+        r"center=(-?\d+\.\d+)%2C(-?\d+\.\d+)",
+
+    ]
+
+    for content in urls_to_check:
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                content
+            )
+
+            if match:
+
+                return (
+                    float(match.group(1)),
+                    float(match.group(2))
+                )
+
+    return None, None
+
+
+# ============================================================
+# 21. EXTRACT ONE RESTAURANT
+# ============================================================
+
+def extract_restaurant(driver, url):
+
+    try:
+
+        driver.get(url)
+
+        WebDriverWait(
+            driver,
+            15
+        ).until(
+            EC.presence_of_element_located(
+                (By.TAG_NAME, "h1")
+            )
+        )
+
+        time.sleep(2)
+
+    except:
+
+        return None
+
+
+    # --------------------------------------------------------
+    # NAME
+    # --------------------------------------------------------
+
+    name = get_first_text(
+        driver,
+        [
+            "h1.DUwDvf",
+            "h1.fontHeadlineLarge",
+            "h1"
+        ]
+    )
+
+
+    # --------------------------------------------------------
+    # OTHER DATA
+    # --------------------------------------------------------
+
+    address = extract_address(driver)
+
+    category = extract_category(driver)
+
+    phone = extract_phone(driver)
+
+    price = extract_price(driver)
+
+    status = extract_status(driver)
+
+    timings = extract_timings(driver)
+
+    website = extract_website(driver)
+
+    famous_food = extract_famous_food(driver)
+
+    rating, reviews = extract_rating_reviews(
+        driver
+    )
+
+    latitude, longitude = extract_coordinates(
+        driver
+    )
+
+
+    # --------------------------------------------------------
+    # GOOGLE MAPS URL
+    # --------------------------------------------------------
+
+    maps_url = driver.current_url
+
+
+    # --------------------------------------------------------
+    # RETURN DATA
+    # --------------------------------------------------------
+
+    return {
+
+        "Restaurant Name": name,
+
+        "Location / Address": address,
+
+        "Category": category,
+
+        "Rating": rating,
+
+        "Reviews": reviews,
+
+        "Price": price,
+
+        "Phone Number": phone,
+
+        "Status": status,
+
+        "Timings": timings,
+
+        "Famous Food": famous_food,
+
+        "Website": website,
+
+        "Latitude": latitude,
+
+        "Longitude": longitude,
+
+        "Google Maps URL": maps_url
+    }
+
+
+# ============================================================
+# 22. SEARCH RESTAURANTS AUTOMATICALLY
+# ============================================================
+
+def search_restaurants(latitude, longitude):
+
+    global restaurants
+    global scraping_running
+
+    with search_lock:
+
+        driver = None
+
+        try:
+
+            print("\n" + "=" * 90)
+            print("🔎 RESTAURANT SEARCH")
+            print("=" * 90)
+
+            print(
+                f"📍 Latitude : {latitude}"
+            )
+
+            print(
+                f"📍 Longitude: {longitude}"
+            )
+
+            print(
+                "🔒 Using ONLY this fixed location."
+            )
+
+            print(
+                "🍽️ Searching automatically for restaurants..."
+            )
+
+            # ------------------------------------------------
+            # GOOGLE MAPS RESTAURANT SEARCH
+            # ------------------------------------------------
+
+            search_url = (
+                "https://www.google.com/maps/search/"
+                f"restaurants/@{latitude},{longitude},15z"
+            )
+
+            print(
+                "\n🌐 Google Maps Search:"
+            )
+
+            print(search_url)
+
+            driver = create_driver()
+
+            driver.get(search_url)
+
+            # ------------------------------------------------
+            # WAIT FOR RESULTS
+            # ------------------------------------------------
+
+            try:
+
+                WebDriverWait(
+                    driver,
+                    25
+                ).until(
+                    EC.presence_of_element_located(
+                        (
+                            By.CSS_SELECTOR,
+                            "div[role='feed']"
+                        )
+                    )
+                )
+
+            except:
+
+                print(
+                    "⚠️ Restaurant feed was not detected."
+                )
+
+
+            time.sleep(4)
+
+
+            # ------------------------------------------------
+            # SCROLL GOOGLE MAPS RESULTS
+            # ------------------------------------------------
+
+            try:
+
+                feed = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "div[role='feed']"
+                )
+
+                previous_count = 0
+
+                for i in range(8):
+
+                    driver.execute_script(
+                        """
+                        arguments[0].scrollTop =
+                        arguments[0].scrollHeight;
+                        """,
+                        feed
+                    )
+
+                    time.sleep(2)
+
+                    anchors = driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "div[role='feed'] "
+                        "a[href*='/maps/place/']"
+                    )
+
+                    current_count = len(anchors)
+
+                    print(
+                        f"📜 Scroll {i+1}/8 "
+                        f"| Restaurants found: "
+                        f"{current_count}"
+                    )
+
+                    if current_count == previous_count:
+
+                        break
+
+                    previous_count = current_count
+
+            except Exception as e:
+
+                print(
+                    "⚠️ Feed scrolling issue:",
+                    e
+                )
+
+
+            # ------------------------------------------------
+            # GET RESTAURANT LINKS
+            # ------------------------------------------------
+
+            anchors = driver.find_elements(
+                By.CSS_SELECTOR,
+                "div[role='feed'] "
+                "a[href*='/maps/place/']"
+            )
+
+            urls = []
+
+            for anchor in anchors:
+
+                try:
+
+                    href = anchor.get_attribute(
+                        "href"
+                    )
+
+                    if href and "/maps/place/" in href:
+
+                        urls.append(href)
+
+                except:
+                    pass
+
+
+            # ------------------------------------------------
+            # REMOVE DUPLICATES
+            # ------------------------------------------------
+
+            urls = list(
+                dict.fromkeys(urls)
+            )
+
+
+            # Limit number
+            MAX_RESTAURANTS = 20
+
+            urls = urls[
+                :MAX_RESTAURANTS
+            ]
+
+
+            print(
+                f"\n🍽️ Unique restaurant listings: "
+                f"{len(urls)}"
+            )
+
+
+            # ------------------------------------------------
+            # EXTRACT DETAILS
+            # ------------------------------------------------
+
+            restaurants = []
+
+            for index, url in enumerate(
+                urls,
+                start=1
+            ):
+
+                print(
+                    f"\n[{index}/{len(urls)}] "
+                    f"Extracting restaurant..."
+                )
+
+                data = extract_restaurant(
+                    driver,
+                    url
+                )
+
+                if not data:
+                    continue
+
+                # If Google didn't expose
+                # restaurant-specific coordinates,
+                # don't falsely invent them.
+                if (
+                    data["Latitude"] is None
+                    or data["Longitude"] is None
+                ):
+
+                    data["Latitude"] = None
+                    data["Longitude"] = None
+
+
+                restaurants.append(data)
+
+
+                print(
+                    "   🍽️",
+                    data["Restaurant Name"]
+                )
+
+                print(
+                    "   ⭐",
+                    data["Rating"]
+                )
+
+                print(
+                    "   💰",
+                    data["Price"]
+                )
+
+                print(
+                    "   📞",
+                    data["Phone Number"]
+                )
+
+
+            # ------------------------------------------------
+            # REMOVE DUPLICATE RESTAURANTS
+            # ------------------------------------------------
+
+            unique = {}
+
+            for item in restaurants:
+
+                key = (
+                    item["Restaurant Name"]
+                    + "|"
+                    + item["Location / Address"]
+                )
+
+                unique[key] = item
+
+            restaurants = list(
+                unique.values()
+            )
+
+
+            # ------------------------------------------------
+            # CREATE DATAFRAME
+            # ------------------------------------------------
+
+            df = pd.DataFrame(
+                restaurants
+            )
+
+
+            # ------------------------------------------------
+            # SHOW RESULT
+            # ------------------------------------------------
+
+            print("\n" + "=" * 90)
+            print("✅ RESTAURANT DATABASE READY")
+            print("=" * 90)
+
+            print(
+                f"🍽️ Total restaurants: "
+                f"{len(df)}"
+            )
+
+
+            with status_output:
+
+                clear_output(wait=True)
+
+                display(
+                    HTML(
+                        f"""
+                        <div style="
+                        background:#e8f5e9;
+                        padding:18px;
+                        border-radius:10px;
+                        ">
+
+                        <h2>
+                        🍽️ Restaurant Search Completed
+                        </h2>
+
+                        <b>Selected Location</b><br>
+
+                        Latitude:
+                        {latitude:.6f}<br>
+
+                        Longitude:
+                        {longitude:.6f}
+
+                        <br><br>
+
+                        <b>
+                        🍽️ Restaurants Found:
+                        {len(df)}
+                        </b>
+
+                        </div>
+                        """
+                    )
+                )
+
+
+                if not df.empty:
+
+                    display(
+                        df
+                    )
+
+                else:
+
+                    display(
+                        HTML(
+                            """
+                            <h3>
+                            ⚠️ No restaurant data
+                            was extracted.
+                            </h3>
+
+                            <p>
+                            Google Maps may have changed
+                            its page structure or blocked
+                            automated requests.
+                            </p>
+                            """
+                        )
+                    )
+
+
+            # ------------------------------------------------
+            # ADD RESTAURANT MARKERS
+            # ------------------------------------------------
+
+            add_restaurant_markers(
+                restaurants
+            )
+
+
+            # ------------------------------------------------
+            # EXPORT
+            # ------------------------------------------------
+
+            if not df.empty:
+
+                df.to_csv(
+                    "/content/restaurants.csv",
+                    index=False
+                )
+
+                df.to_excel(
+                    "/content/restaurants.xlsx",
+                    index=False
+                )
+
+
+                display(
+                    HTML(
+                        """
+                        <br>
+
+                        <a href="/files/restaurants.csv"
+                           target="_blank"
+                           style="
+                           background:#2e7d32;
+                           color:white;
+                           padding:10px 15px;
+                           text-decoration:none;
+                           border-radius:6px;
+                           margin-right:10px;
+                           ">
+                           📥 Download CSV
+                        </a>
+
+                        <a href="/files/restaurants.xlsx"
+                           target="_blank"
+                           style="
+                           background:#1565c0;
+                           color:white;
+                           padding:10px 15px;
+                           text-decoration:none;
+                           border-radius:6px;
+                           ">
+                           📥 Download Excel
+                        </a>
+                        """
+                    )
+                )
+
+
+        except Exception as e:
+
+            print(
+                "\n❌ SCRAPING ERROR:"
+            )
+
+            print(
+                repr(e)
+            )
+
+            with status_output:
+
+                clear_output(wait=True)
+
+                display(
+                    HTML(
+                        f"""
+                        <div style="
+                        background:#ffebee;
+                        padding:15px;
+                        border-radius:8px;
+                        ">
+
+                        <h3>
+                        ❌ Restaurant search failed
+                        </h3>
+
+                        <pre>{str(e)}</pre>
+
+                        </div>
+                        """
+                    )
+                )
+
+
+        finally:
+
+            if driver:
+
+                try:
+                    driver.quit()
+                except:
+                    pass
+
+            scraping_running = False
+
+
+# ============================================================
+# 23. ADD RESTAURANT MARKERS
+# ============================================================
+
+def add_restaurant_markers(data):
+
+    global restaurant_markers
+
+    # Remove previous restaurant markers
+    for marker in restaurant_markers:
+
+        try:
+
+            restaurant_map.remove_layer(
+                marker
+            )
+
+        except:
+            pass
+
+    restaurant_markers = []
+
+
+    for item in data:
+
+        lat = item.get(
+            "Latitude"
+        )
+
+        lon = item.get(
+            "Longitude"
+        )
+
+        # Don't put fake markers at
+        # selected location
+        if lat is None or lon is None:
+
+            continue
+
+
+        # ----------------------------------------------------
+        # POPUP CONTENT
+        # ----------------------------------------------------
+
+        popup_html = f"""
+
+        <div style="
+            width:300px;
+            font-family:Arial;
+        ">
+
+        <h3>
+        🍽️ {item.get("Restaurant Name")}
+        </h3>
+
+        <hr>
+
+        <b>📍 Location:</b><br>
+        {item.get("Location / Address")}
+
+        <br><br>
+
+        <b>⭐ Rating:</b>
+        {item.get("Rating")}
+
+        <br>
+
+        <b>💬 Reviews:</b>
+        {item.get("Reviews")}
+
+        <br>
+
+        <b>💰 Price:</b>
+        {item.get("Price")}
+
+        <br>
+
+        <b>📞 Phone:</b>
+        {item.get("Phone Number")}
+
+        <br>
+
+        <b>🍴 Category:</b>
+        {item.get("Category")}
+
+        <br>
+
+        <b>🍽️ Famous Food:</b>
+        {item.get("Famous Food")}
+
+        <br>
+
+        <b>🕐 Status:</b>
+        {item.get("Status")}
+
+        <br><br>
+
+        <a href="{item.get("Google Maps URL")}"
+           target="_blank">
+
+           📍 Open in Google Maps
+
+        </a>
+
+        </div>
+
+        """
+
+
+        popup = Popup(
+            location=(lat, lon),
+            child=WidgetHTML(
+                value=popup_html
+            ),
+            close_button=True,
+            auto_close=True
+        )
+
+
+        marker = Marker(
+            location=(lat, lon),
+            draggable=False
+        )
+
+        marker.popup = popup
+
+
+        restaurant_map.add_layer(
+            marker
+        )
+
+        restaurant_markers.append(
+            marker
+        )
+
+
+# ============================================================
+# 24. RESET BUTTON
+# ============================================================
+
+reset_button = Button(
+    description="🔄 Reset Location",
+    button_style="warning"
+)
+
+
+def reset_location(button):
+
+    global location_locked
+    global selected_lat
+    global selected_lon
+    global selected_marker
+    global restaurants
+
+    location_locked = False
+
+    selected_lat = None
+    selected_lon = None
+
+    restaurants = []
+
+    if selected_marker:
+
+        try:
+
+            restaurant_map.remove_layer(
+                selected_marker
+            )
+
+        except:
+            pass
+
+        selected_marker = None
+
+
+    for marker in restaurant_markers:
+
+        try:
+
+            restaurant_map.remove_layer(
+                marker
+            )
+
+        except:
+            pass
+
+
+    restaurant_markers.clear()
+
+
+    with status_output:
+
+        clear_output(wait=True)
+
+        display(
+            HTML(
+                """
+                <h3>
+                🔄 Ready for a new location
+                </h3>
+
+                <p>
+                Click ONE location on the map.
+                </p>
+                """
+            )
+        )
+
+
+reset_button.on_click(
+    reset_location
+)
+
+
+display(reset_button)
+
+
+# ============================================================
+# READY MESSAGE
+# ============================================================
+
+print()
+print("=" * 90)
+print("🗺️ RESTAURANT FINDER READY")
+print("=" * 90)
+
+print()
+print("👉 Click ONE location on the map.")
+print("👉 That location will be LOCKED.")
+print("👉 Google Maps will open at that exact point.")
+print("👉 No Google API key is used.")
+print("👉 Selenium searches Google Maps automatically.")
+print("👉 Only RESTAURANTS are searched.")
+print("👉 Restaurant details are extracted.")
+print("👉 Restaurant markers appear on the map.")
+print("👉 Restaurant database appears below.")
+print("👉 CSV + Excel are generated.")
+print()
+print("=" * 90)
