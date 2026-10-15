@@ -1,0 +1,299 @@
+# ================================================================
+# AI SMART ASSISTANT FOR VISUALLY IMPAIRED PEOPLE
+# Colab single-cell: Instance Segmentation + Scene Caption + Speech
+# Local translation model (no unofficial Google Translate endpoint)
+# ================================================================
+
+import sys, subprocess, warnings, os, re
+warnings.filterwarnings("ignore")
+
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install", "-q",
+    "ultralytics", "transformers", "sentencepiece",
+    "sacremoses", "gTTS", "opencv-python-headless"
+])
+
+import cv2
+import torch
+import numpy as np
+from PIL import Image
+from google.colab import files
+from ultralytics import YOLO
+from transformers import (
+    BlipProcessor, BlipForConditionalGeneration,
+    AutoTokenizer, AutoModelForSeq2SeqLM
+)
+from gtts import gTTS
+from IPython.display import display, Audio
+
+# ---------------- SETTINGS ----------------
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print("Device:", DEVICE)
+
+print("\nChoose speech language:")
+print("1 - Telugu")
+print("2 - Hindi")
+print("3 - English")
+choice = input("Enter 1, 2, or 3 [default 1]: ").strip() or "1"
+
+LANGS = {
+    "1": {"name": "Telugu", "tts": "te", "model": "ai4bharat/indictrans2-en-indic-1B"},
+    "2": {"name": "Hindi", "tts": "hi", "model": "ai4bharat/indictrans2-en-indic-1B"},
+    "3": {"name": "English", "tts": "en", "model": None},
+}
+lang = LANGS.get(choice, LANGS["1"])
+target_language = lang["name"]
+
+# ---------------- UPLOAD IMAGE ----------------
+uploaded = files.upload()
+if not uploaded:
+    raise ValueError("Upload one image to continue.")
+
+image_path = next(iter(uploaded))
+pil_image = Image.open(image_path).convert("RGB")
+rgb = np.array(pil_image)
+H, W = rgb.shape[:2]
+
+print("\nImage:", image_path, "| Size:", W, "x", H)
+display(pil_image.resize((min(W, 1000), max(1, int(H * min(1000 / W, 1))))))
+
+# ---------------- LOAD MODELS ----------------
+print("\nLoading instance segmentation model...")
+segmenter = YOLO("yolo11m-seg.pt")
+
+print("Loading scene captioning model...")
+caption_processor = BlipProcessor.from_pretrained(
+    "Salesforce/blip-image-captioning-base"
+)
+caption_model = BlipForConditionalGeneration.from_pretrained(
+    "Salesforce/blip-image-captioning-base"
+).to(DEVICE).eval()
+
+# ---------------- SCENE CAPTION ----------------
+caption_inputs = caption_processor(
+    images=pil_image, return_tensors="pt"
+).to(DEVICE)
+with torch.no_grad():
+    caption_ids = caption_model.generate(
+        **caption_inputs, max_new_tokens=60, num_beams=4
+    )
+caption = caption_processor.decode(
+    caption_ids[0], skip_special_tokens=True
+).strip()
+
+# ---------------- INSTANCE SEGMENTATION ----------------
+print("Segmenting visible objects...")
+result = segmenter.predict(
+    source=pil_image,
+    imgsz=960,
+    conf=0.20,
+    iou=0.50,
+    max_det=200,
+    verbose=False
+)[0]
+
+objects = []
+for i, box in enumerate(result.boxes or []):
+    label = result.names[int(box.cls[0])]
+    confidence = float(box.conf[0])
+    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+    x1, x2 = max(0, x1), min(W - 1, x2)
+    y1, y2 = max(0, y1), min(H - 1, y2)
+    if x2 <= x1 or y2 <= y1:
+        continue
+
+    cx = (x1 + x2) / 2
+    position = "left" if cx < W / 3 else ("right" if cx > 2 * W / 3 else "center")
+
+    mask = None
+    if result.masks is not None and i < len(result.masks.data):
+        small_mask = result.masks.data[i].cpu().numpy()
+        mask = cv2.resize(
+            small_mask, (W, H), interpolation=cv2.INTER_NEAREST
+        ) > 0.5
+
+    objects.append({
+        "label": label, "confidence": confidence,
+        "position": position, "box": (x1, y1, x2, y2),
+        "mask": mask
+    })
+
+# Suppress obvious same-class duplicates by box IoU.
+filtered = []
+for obj in sorted(objects, key=lambda o: o["confidence"], reverse=True):
+    x1, y1, x2, y2 = obj["box"]
+    duplicate = False
+    for old in filtered:
+        if old["label"] != obj["label"]:
+            continue
+        a, b, c, d = old["box"]
+        ix1, iy1, ix2, iy2 = max(x1, a), max(y1, b), min(x2, c), min(y2, d)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        area1 = max(1, (x2 - x1) * (y2 - y1))
+        area2 = max(1, (c - a) * (d - b))
+        iou = inter / (area1 + area2 - inter + 1e-9)
+        if iou > 0.80:
+            duplicate = True
+            break
+    if not duplicate:
+        filtered.append(obj)
+
+# ---------------- VISUALIZE MASKS ----------------
+overlay = rgb.copy()
+rng = np.random.default_rng(7)
+for obj in filtered:
+    color = np.array(rng.integers(50, 255, 3), dtype=np.uint8)
+    x1, y1, x2, y2 = obj["box"]
+    mask = obj["mask"]
+    if mask is not None:
+        overlay[mask] = (
+            overlay[mask].astype(np.float32) * 0.55 +
+            color.astype(np.float32) * 0.45
+        ).astype(np.uint8)
+        contours, _ = cv2.findContours(
+            mask.astype(np.uint8), cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        cv2.drawContours(overlay, contours, -1, color.tolist(), 2)
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), color.tolist(), 2)
+    cv2.putText(
+        overlay,
+        f'{obj["label"]} {obj["confidence"]:.0%} {obj["position"]}',
+        (x1, max(20, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX,
+        0.48, color.tolist(), 2, cv2.LINE_AA
+    )
+
+print("\nINSTANCE SEGMENTATION RESULT")
+display(Image.fromarray(overlay))
+
+# ---------------- COUNTS AND GROUPS ----------------
+counts = {}
+groups = {}
+for obj in filtered:
+    counts[obj["label"]] = counts.get(obj["label"], 0) + 1
+    groups.setdefault((obj["label"], obj["position"]), []).append(obj)
+
+vehicles_set = {"car", "truck", "bus", "motorcycle", "bicycle", "train"}
+animals_set = {"dog", "cat", "bird", "horse", "cow", "sheep", "elephant", "bear", "zebra", "giraffe"}
+bag_set = {"handbag", "backpack", "suitcase"}
+people = counts.get("person", 0)
+vehicles = sum(counts.get(x, 0) for x in vehicles_set)
+animals = sum(counts.get(x, 0) for x in animals_set)
+bags = sum(counts.get(x, 0) for x in bag_set)
+
+print("\nScene caption:", caption)
+print("People:", people, "| Vehicles:", vehicles, "| Animals:", animals, "| Bags/luggage:", bags)
+print("Detected classes:", counts)
+
+# ---------------- NATURAL ENGLISH OBSERVATION ----------------
+parts = [f"Here's what I can observe. The picture appears to show {caption}."]
+
+if people >= 10:
+    parts.append(f"It looks quite crowded. I detected {people} people, although some may be hidden or missed.")
+elif people >= 4:
+    parts.append(f"There are several people around. I detected {people} people.")
+elif people > 0:
+    parts.append(f"I detected {people} {'person' if people == 1 else 'people'}.")
+else:
+    parts.append("I couldn't confidently detect people in this picture.")
+
+if vehicles:
+    parts.append(f"I detected {vehicles} vehicle{'s' if vehicles != 1 else ''}.")
+if animals:
+    parts.append(f"I detected {animals} animal{'s' if animals != 1 else ''}.")
+if bags:
+    parts.append(f"I detected {bags} bag or luggage item{'s' if bags != 1 else ''}.")
+
+priority = {
+    "car": 1, "truck": 1, "bus": 1, "motorcycle": 1, "bicycle": 1,
+    "person": 2, "dog": 2, "horse": 2,
+    "backpack": 3, "handbag": 3, "suitcase": 3
+}
+ordered_groups = sorted(
+    groups.items(),
+    key=lambda item: (priority.get(item[0][0], 5), -len(item[1]))
+)
+
+descriptions = []
+for (label, position), items in ordered_groups[:7]:
+    n = len(items)
+    noun = ("person" if n == 1 else "people") if label == "person" else label + ("" if n == 1 else "s")
+    if position == "center":
+        descriptions.append(f"{n} {noun} around the center of the image")
+    else:
+        descriptions.append(f"{n} {noun} on the {position}")
+
+if descriptions:
+    parts.append("I can also see " + "; ".join(descriptions) + ".")
+
+parts.append(
+    "This is based on a single picture. I can't confirm exact distances, "
+    "detect every small obstacle, or guarantee that the path is safe. "
+    "Please continue using your usual mobility aid."
+)
+english_observation = " ".join(parts)
+
+# ---------------- LOCAL TRANSLATION ----------------
+def translate_with_indictrans(text, target_name, model_name):
+    # IndicTrans2 requires its own language tags and normalization.
+    # Model loading is attempted only for Telugu or Hindi.
+    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+    from transformers.models.nllb.tokenization_nllb import NllbTokenizer
+    # IndicTrans2's official tokenizer/model wrappers are not included
+    # in every Transformers install. Avoid pretending a generic tokenizer
+    # is compatible with IndicTrans2.
+    raise RuntimeError(
+        "IndicTrans2 needs its official IndicTransToolkit preprocessing. "
+        "Use the optional NLLB multilingual translation fallback below."
+    )
+
+def translate_with_nllb(text, target_code):
+    model_id = "facebook/nllb-200-distilled-600M"
+    tok = AutoTokenizer.from_pretrained(model_id)
+    mdl = AutoModelForSeq2SeqLM.from_pretrained(model_id).to(DEVICE).eval()
+    target_map = {"te": "tel_Telu", "hi": "hin_Deva"}
+    tok.src_lang = "eng_Latn"
+    inputs = tok(text, return_tensors="pt", truncation=True, max_length=512).to(DEVICE)
+    with torch.no_grad():
+        generated = mdl.generate(
+            **inputs,
+            forced_bos_token_id=tok.convert_tokens_to_ids(target_map[target_code]),
+            max_new_tokens=220,
+            num_beams=4
+        )
+    return tok.batch_decode(generated, skip_special_tokens=True)[0]
+
+spoken_text = english_observation
+speech_lang = "en"
+
+if lang["tts"] != "en":
+    try:
+        print("\nLoading local multilingual translation model...")
+        spoken_text = translate_with_nllb(english_observation, lang["tts"])
+        speech_lang = lang["tts"]
+    except Exception as exc:
+        print("Local translation could not run:", str(exc)[:300])
+        print("Keeping the English observation instead of pretending it was translated.")
+        spoken_text = english_observation
+        speech_lang = "en"
+
+print(f"\n========== SPOKEN OBSERVATION ({target_language}) ==========")
+print(spoken_text)
+
+# ---------------- TEXT TO SPEECH ----------------
+audio_path = "/content/smart_assistant_observation.mp3"
+gTTS(text=spoken_text, lang=speech_lang, slow=False).save(audio_path)
+display(Audio(audio_path, autoplay=False))
+
+# ---------------- SAVE OUTPUTS ----------------
+cv2.imwrite("/content/instance_segmentation_result.jpg", cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+print("\nSaved:")
+print("/content/instance_segmentation_result.jpg")
+print(audio_path)
+
+print(
+    "\nSAFETY: This prototype does not provide verified distances in metres. "
+    "YOLO11-seg is pretrained on common classes and may miss stones, potholes, "
+    "curbs, shops, partially hidden people and other hazards. Do not use it "
+    "as the sole navigation aid."
+)
