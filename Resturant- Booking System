@@ -1,0 +1,2597 @@
+# ============================================================
+# ADVANCED AGENTIC RESTAURANT BOOKING CHATBOT
+# GOOGLE COLAB
+#
+# NO GRADIO
+# NO API KEY
+# NO EXTERNAL BOOKING API
+# SAMPLE RESTAURANTS
+# SAMPLE PAYMENT
+# SAMPLE BOOKING
+# ============================================================
+
+!pip -q install flask flask-cors pyngrok
+
+import os
+import re
+import random
+import threading
+import time
+from datetime import datetime
+from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
+
+# ============================================================
+# FLASK APP
+# ============================================================
+
+app = Flask(__name__)
+CORS(app)
+
+# ============================================================
+# SAMPLE RESTAURANT DATABASE
+# ============================================================
+
+RESTAURANTS = [
+    {
+        "id": "R001",
+        "name": "Barbeque Nation",
+        "location": "Banjara Hills",
+        "city": "Hyderabad",
+        "cuisine": "BBQ, Grill, North Indian",
+        "rating": 4.4,
+        "price": "₹₹",
+        "veg": True,
+        "nonveg": True,
+        "timings": "12:00 PM - 11:30 PM"
+    },
+    {
+        "id": "R002",
+        "name": "Absolute Barbecues",
+        "location": "Banjara Hills",
+        "city": "Hyderabad",
+        "cuisine": "BBQ, Grill, Indian",
+        "rating": 4.3,
+        "price": "₹₹",
+        "veg": True,
+        "nonveg": True,
+        "timings": "12:00 PM - 11:30 PM"
+    },
+    {
+        "id": "R003",
+        "name": "Taj Krishna",
+        "location": "Banjara Hills",
+        "city": "Hyderabad",
+        "cuisine": "Indian, Continental",
+        "rating": 4.5,
+        "price": "₹₹₹₹",
+        "veg": True,
+        "nonveg": True,
+        "timings": "7:00 AM - 11:00 PM"
+    },
+    {
+        "id": "R004",
+        "name": "Olive Bistro",
+        "location": "Jubilee Hills",
+        "city": "Hyderabad",
+        "cuisine": "Mediterranean, Continental",
+        "rating": 4.4,
+        "price": "₹₹₹",
+        "veg": True,
+        "nonveg": True,
+        "timings": "12:00 PM - 11:30 PM"
+    },
+    {
+        "id": "R005",
+        "name": "AB's Absolute Barbecues",
+        "location": "Jubilee Hills",
+        "city": "Hyderabad",
+        "cuisine": "BBQ, Grill, Indian",
+        "rating": 4.2,
+        "price": "₹₹",
+        "veg": True,
+        "nonveg": True,
+        "timings": "12:00 PM - 11:30 PM"
+    }
+]
+
+# ============================================================
+# SESSION STORAGE
+# ============================================================
+
+SESSIONS = {}
+
+
+def get_session(session_id):
+
+    if session_id not in SESSIONS:
+
+        SESSIONS[session_id] = {
+            "intent": None,
+            "location": None,
+            "date": None,
+            "time": None,
+            "guests": None,
+            "preference": None,
+            "restaurant": None,
+            "customer": {},
+            "payment": {}
+        }
+
+    return SESSIONS[session_id]
+
+
+# ============================================================
+# TEXT EXTRACTION
+# ============================================================
+
+def extract_location(text):
+
+    locations = [
+        "Banjara Hills",
+        "Jubilee Hills",
+        "HITEC City",
+        "Madhapur",
+        "Begumpet",
+        "Secunderabad",
+        "Hyderabad"
+    ]
+
+    text_lower = text.lower()
+
+    for location in locations:
+
+        if location.lower() in text_lower:
+            return location
+
+    return None
+
+
+def extract_guests(text):
+
+    patterns = [
+        r'(\d+)\s*people',
+        r'(\d+)\s*persons',
+        r'(\d+)\s*guests',
+        r'for\s+(\d+)',
+        r'party\s+of\s+(\d+)'
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(pattern, text.lower())
+
+        if match:
+
+            number = int(match.group(1))
+
+            if 1 <= number <= 100:
+                return number
+
+    return None
+
+
+def extract_time(text):
+
+    text_lower = text.lower()
+
+    match = re.search(
+        r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)',
+        text_lower
+    )
+
+    if match:
+
+        hour = match.group(1)
+        minute = match.group(2) or "00"
+        period = match.group(3).upper()
+
+        return f"{hour}:{minute} {period}"
+
+    if "tonight" in text_lower:
+        return "Tonight"
+
+    if "evening" in text_lower:
+        return "Evening"
+
+    if "night" in text_lower:
+        return "Night"
+
+    if "afternoon" in text_lower:
+        return "Afternoon"
+
+    if "morning" in text_lower:
+        return "Morning"
+
+    return None
+
+
+def extract_date(text):
+
+    text_lower = text.lower()
+
+    if "tonight" in text_lower:
+        return "Tonight"
+
+    if "today" in text_lower:
+        return "Today"
+
+    if "tomorrow" in text_lower:
+        return "Tomorrow"
+
+    return None
+
+
+def extract_preference(text):
+
+    text_lower = text.lower()
+
+    if any(word in text_lower for word in [
+        "non veg",
+        "non-veg",
+        "nonveg",
+        "chicken",
+        "mutton",
+        "meat"
+    ]):
+        return "Non-Veg"
+
+    if any(word in text_lower for word in [
+        "veg",
+        "vegetarian"
+    ]):
+        return "Veg"
+
+    return None
+
+
+# ============================================================
+# RESTAURANT SEARCH
+# ============================================================
+
+def search_restaurants(session):
+
+    results = []
+
+    location = session["location"]
+    preference = session["preference"]
+
+    for restaurant in RESTAURANTS:
+
+        if location:
+
+            if restaurant["location"].lower() != location.lower():
+
+                continue
+
+        if preference == "Veg" and not restaurant["veg"]:
+            continue
+
+        if preference == "Non-Veg" and not restaurant["nonveg"]:
+            continue
+
+        results.append(restaurant)
+
+    return results
+
+
+# ============================================================
+# CHAT RESPONSE ENGINE
+# ============================================================
+
+@app.route("/chat", methods=["POST"])
+def chat():
+
+    data = request.json
+
+    session_id = data.get("session_id")
+    message = data.get("message", "").strip()
+
+    session = get_session(session_id)
+
+    if not message:
+
+        return jsonify({
+            "type": "message",
+            "message": "Please enter your request."
+        })
+
+    text = message.lower()
+
+    # --------------------------------------------------------
+    # DETECT RESTAURANT INTENT
+    # --------------------------------------------------------
+
+    if any(word in text for word in [
+        "restaurant",
+        "table",
+        "dinner",
+        "lunch",
+        "bbq",
+        "barbecue",
+        "book a table"
+    ]):
+
+        session["intent"] = "restaurant"
+
+    # --------------------------------------------------------
+    # EXTRACT DETAILS
+    # --------------------------------------------------------
+
+    location = extract_location(message)
+
+    if location:
+        session["location"] = location
+
+    guests = extract_guests(message)
+
+    if guests:
+        session["guests"] = guests
+
+    date = extract_date(message)
+
+    if date:
+        session["date"] = date
+
+    selected_time = extract_time(message)
+
+    if selected_time:
+        session["time"] = selected_time
+
+    preference = extract_preference(message)
+
+    if preference:
+        session["preference"] = preference
+
+    # --------------------------------------------------------
+    # ASK MISSING INFORMATION
+    # --------------------------------------------------------
+
+    if session["intent"] == "restaurant":
+
+        if not session["location"]:
+
+            return jsonify({
+                "type": "question",
+                "agent": "Restaurant Booking Agent",
+                "message":
+                    "Sure! Which location would you like to book the restaurant in?",
+                "field": "location",
+                "suggestions": [
+                    "Banjara Hills",
+                    "Jubilee Hills",
+                    "Madhapur",
+                    "HITEC City"
+                ]
+            })
+
+        if not session["date"]:
+
+            return jsonify({
+                "type": "question",
+                "agent": "Restaurant Booking Agent",
+                "message":
+                    "What date would you like to visit?",
+                "field": "date",
+                "suggestions": [
+                    "Today",
+                    "Tomorrow",
+                    "Tonight"
+                ]
+            })
+
+        if not session["time"]:
+
+            return jsonify({
+                "type": "question",
+                "agent": "Restaurant Booking Agent",
+                "message":
+                    "What time would you prefer?",
+                "field": "time",
+                "suggestions": [
+                    "7:00 PM",
+                    "8:00 PM",
+                    "9:00 PM"
+                ]
+            })
+
+        if not session["guests"]:
+
+            return jsonify({
+                "type": "question",
+                "agent": "Restaurant Booking Agent",
+                "message":
+                    "How many people will be joining?",
+                "field": "guests",
+                "suggestions": [
+                    "2",
+                    "4",
+                    "6"
+                ]
+            })
+
+        if not session["preference"]:
+
+            return jsonify({
+                "type": "question",
+                "agent": "Restaurant Booking Agent",
+                "message":
+                    "Do you prefer Vegetarian or Non-Vegetarian food?",
+                "field": "preference",
+                "suggestions": [
+                    "Veg",
+                    "Non-Veg"
+                ]
+            })
+
+        # ----------------------------------------------------
+        # ALL DETAILS AVAILABLE
+        # ----------------------------------------------------
+
+        results = search_restaurants(session)
+
+        return jsonify({
+            "type": "results",
+            "agent": "Restaurant Booking Agent",
+            "message":
+                "Perfect. I have all the details. Here are the available sample restaurants.",
+            "details": {
+                "location": session["location"],
+                "date": session["date"],
+                "time": session["time"],
+                "guests": session["guests"],
+                "preference": session["preference"]
+            },
+            "results": results
+        })
+
+    return jsonify({
+        "type": "message",
+        "agent": "Universal Booking Agent",
+        "message":
+            "I can currently handle restaurant booking in this demo. Try: 'I want to book a restaurant'."
+    })
+
+
+# ============================================================
+# SELECT RESTAURANT
+# ============================================================
+
+@app.route("/select-restaurant", methods=["POST"])
+def select_restaurant():
+
+    data = request.json
+
+    session_id = data.get("session_id")
+    restaurant_id = data.get("restaurant_id")
+
+    session = get_session(session_id)
+
+    restaurant = next(
+        (
+            r for r in RESTAURANTS
+            if r["id"] == restaurant_id
+        ),
+        None
+    )
+
+    if not restaurant:
+
+        return jsonify({
+            "success": False,
+            "message": "Restaurant not found."
+        })
+
+    session["restaurant"] = restaurant
+
+    return jsonify({
+        "success": True,
+        "restaurant": restaurant,
+        "message":
+            "Great choice! Please enter your details to continue."
+    })
+
+
+# ============================================================
+# CUSTOMER DETAILS
+# ============================================================
+
+@app.route("/customer-details", methods=["POST"])
+def customer_details():
+
+    data = request.json
+
+    session_id = data.get("session_id")
+
+    session = get_session(session_id)
+
+    name = data.get("name", "").strip()
+    phone = data.get("phone", "").strip()
+    email = data.get("email", "").strip()
+    special_request = data.get(
+        "special_request",
+        ""
+    ).strip()
+
+    if not name:
+
+        return jsonify({
+            "success": False,
+            "message": "Please enter your full name."
+        })
+
+    if not phone:
+
+        return jsonify({
+            "success": False,
+            "message": "Please enter your phone number."
+        })
+
+    if not re.match(r'^[0-9+\-\s]{8,15}$', phone):
+
+        return jsonify({
+            "success": False,
+            "message": "Please enter a valid phone number."
+        })
+
+    if email and "@" not in email:
+
+        return jsonify({
+            "success": False,
+            "message": "Please enter a valid email address."
+        })
+
+    session["customer"] = {
+
+        "name": name,
+        "phone": phone,
+        "email": email,
+        "special_request": special_request
+    }
+
+    return jsonify({
+
+        "success": True,
+
+        "amount": 2000,
+
+        "currency": "INR",
+
+        "message":
+            "Customer details saved. Continue to demo payment."
+    })
+
+
+# ============================================================
+# DEMO PAYMENT
+# ============================================================
+
+@app.route("/payment", methods=["POST"])
+def payment():
+
+    data = request.json
+
+    session_id = data.get("session_id")
+
+    session = get_session(session_id)
+
+    method = data.get(
+        "method",
+        "UPI"
+    )
+
+    if not session["restaurant"]:
+
+        return jsonify({
+            "success": False,
+            "message": "Please select a restaurant first."
+        })
+
+    transaction_id = (
+        "TXN-"
+        + str(random.randint(100000, 999999))
+    )
+
+    session["payment"] = {
+
+        "transaction_id": transaction_id,
+
+        "amount": 2000,
+
+        "method": method,
+
+        "status": "SUCCESS"
+    }
+
+    return jsonify({
+
+        "success": True,
+
+        "transaction_id": transaction_id,
+
+        "amount": 2000,
+
+        "status": "SUCCESS"
+    })
+
+
+# ============================================================
+# FINAL BOOKING
+# ============================================================
+
+@app.route("/confirm-booking", methods=["POST"])
+def confirm_booking():
+
+    data = request.json
+
+    session_id = data.get("session_id")
+
+    session = get_session(session_id)
+
+    if not session["restaurant"]:
+
+        return jsonify({
+            "success": False,
+            "message": "Restaurant not selected."
+        })
+
+    if not session["customer"]:
+
+        return jsonify({
+            "success": False,
+            "message": "Customer details missing."
+        })
+
+    if not session["payment"]:
+
+        return jsonify({
+            "success": False,
+            "message": "Payment not completed."
+        })
+
+    booking_id = (
+        "RES-"
+        + str(random.randint(100000, 999999))
+    )
+
+    session["booking_id"] = booking_id
+
+    return jsonify({
+
+        "success": True,
+
+        "booking": {
+
+            "booking_id": booking_id,
+
+            "restaurant":
+                session["restaurant"]["name"],
+
+            "location":
+                session["restaurant"]["location"],
+
+            "date":
+                session["date"],
+
+            "time":
+                session["time"],
+
+            "guests":
+                session["guests"],
+
+            "preference":
+                session["preference"],
+
+            "customer":
+                session["customer"],
+
+            "payment":
+                session["payment"],
+
+            "status":
+                "CONFIRMED"
+        }
+    })
+
+
+# ============================================================
+# FRONTEND
+# ============================================================
+
+HTML = r"""
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title>AI Booking Agent</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+
+    margin: 0;
+
+    font-family:
+        Inter,
+        Arial,
+        sans-serif;
+
+    background:
+        #f4f6f9;
+
+    color:
+        #202124;
+}
+
+.header {
+
+    background:
+        #ffffff;
+
+    border-bottom:
+        1px solid #e5e7eb;
+
+    padding:
+        18px 25px;
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        space-between;
+
+    position:
+        sticky;
+
+    top: 0;
+
+    z-index: 10;
+}
+
+.logo {
+
+    font-size:
+        21px;
+
+    font-weight:
+        800;
+}
+
+.status {
+
+    font-size:
+        13px;
+
+    color:
+        #16803c;
+}
+
+.container {
+
+    max-width:
+        1050px;
+
+    margin:
+        auto;
+
+    padding:
+        25px 15px 120px;
+}
+
+.chat {
+
+    display:
+        flex;
+
+    flex-direction:
+        column;
+
+    gap:
+        18px;
+}
+
+.message {
+
+    max-width:
+        82%;
+
+    padding:
+        15px 18px;
+
+    border-radius:
+        17px;
+
+    line-height:
+        1.5;
+
+    animation:
+        fadeIn .25s ease;
+}
+
+.user {
+
+    align-self:
+        flex-end;
+
+    background:
+        #111827;
+
+    color:
+        white;
+
+    border-bottom-right-radius:
+        5px;
+}
+
+.bot {
+
+    align-self:
+        flex-start;
+
+    background:
+        white;
+
+    border:
+        1px solid #e5e7eb;
+
+    border-bottom-left-radius:
+        5px;
+
+    box-shadow:
+        0 4px 15px
+        rgba(0,0,0,.04);
+}
+
+.agent {
+
+    font-size:
+        12px;
+
+    font-weight:
+        700;
+
+    margin-bottom:
+        6px;
+
+    color:
+        #555;
+}
+
+.composer {
+
+    position:
+        fixed;
+
+    left:
+        0;
+
+    right:
+        0;
+
+    bottom:
+        0;
+
+    background:
+        rgba(255,255,255,.97);
+
+    border-top:
+        1px solid #ddd;
+
+    padding:
+        14px;
+
+    z-index:
+        20;
+}
+
+.composer-inner {
+
+    max-width:
+        850px;
+
+    margin:
+        auto;
+
+    display:
+        flex;
+
+    gap:
+        10px;
+}
+
+.composer input {
+
+    flex:
+        1;
+
+    border:
+        1px solid #d5d9df;
+
+    border-radius:
+        15px;
+
+    padding:
+        15px;
+
+    font-size:
+        16px;
+
+    outline:
+        none;
+}
+
+button {
+
+    border:
+        none;
+
+    cursor:
+        pointer;
+
+    border-radius:
+        11px;
+
+    padding:
+        11px 17px;
+
+    font-weight:
+        700;
+
+    font-size:
+        14px;
+}
+
+.send {
+
+    background:
+        #111827;
+
+    color:
+        white;
+
+    min-width:
+        85px;
+}
+
+.quick {
+
+    display:
+        flex;
+
+    flex-wrap:
+        wrap;
+
+    gap:
+        8px;
+
+    margin-top:
+        10px;
+}
+
+.quick button {
+
+    background:
+        #f1f3f5;
+
+    border:
+        1px solid #ddd;
+
+}
+
+.detail-box {
+
+    display:
+        grid;
+
+    grid-template-columns:
+        repeat(auto-fit,minmax(140px,1fr));
+
+    gap:
+        10px;
+
+    margin-top:
+        15px;
+}
+
+.detail {
+
+    background:
+        #f7f8fa;
+
+    padding:
+        11px;
+
+    border-radius:
+        10px;
+}
+
+.detail small {
+
+    display:
+        block;
+
+    color:
+        #777;
+
+    font-size:
+        11px;
+
+    margin-bottom:
+        3px;
+}
+
+.detail strong {
+
+    font-size:
+        14px;
+}
+
+.restaurant-grid {
+
+    display:
+        grid;
+
+    grid-template-columns:
+        repeat(auto-fit,minmax(260px,1fr));
+
+    gap:
+        15px;
+
+    margin-top:
+        15px;
+}
+
+.restaurant-card {
+
+    border:
+        1px solid #e2e5e9;
+
+    background:
+        white;
+
+    border-radius:
+        16px;
+
+    padding:
+        18px;
+
+    transition:
+        .2s;
+}
+
+.restaurant-card:hover {
+
+    transform:
+        translateY(-2px);
+
+    box-shadow:
+        0 8px 25px
+        rgba(0,0,0,.08);
+}
+
+.restaurant-card h3 {
+
+    margin:
+        0 0 8px;
+
+    font-size:
+        18px;
+}
+
+.meta {
+
+    color:
+        #666;
+
+    font-size:
+        13px;
+
+    margin:
+        7px 0;
+}
+
+.book-btn {
+
+    width:
+        100%;
+
+    margin-top:
+        13px;
+
+    background:
+        #111827;
+
+    color:
+        white;
+}
+
+.modal {
+
+    display:
+        none;
+
+    position:
+        fixed;
+
+    inset:
+        0;
+
+    background:
+        rgba(0,0,0,.55);
+
+    z-index:
+        100;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    padding:
+        15px;
+}
+
+.modal.show {
+
+    display:
+        flex;
+}
+
+.modal-box {
+
+    background:
+        white;
+
+    width:
+        100%;
+
+    max-width:
+        500px;
+
+    max-height:
+        90vh;
+
+    overflow:
+        auto;
+
+    border-radius:
+        20px;
+
+    padding:
+        25px;
+}
+
+.modal-header {
+
+    display:
+        flex;
+
+    justify-content:
+        space-between;
+
+    align-items:
+        center;
+}
+
+.close {
+
+    background:
+        #f0f0f0;
+
+    border-radius:
+        50%;
+
+    width:
+        40px;
+
+    height:
+        40px;
+
+    padding:
+        0;
+}
+
+.form-group {
+
+    margin-top:
+        14px;
+}
+
+.form-group label {
+
+    display:
+        block;
+
+    font-size:
+        13px;
+
+    font-weight:
+        700;
+
+    margin-bottom:
+        6px;
+}
+
+.form-group input,
+.form-group textarea,
+.form-group select {
+
+    width:
+        100%;
+
+    border:
+        1px solid #d7dbe0;
+
+    border-radius:
+        10px;
+
+    padding:
+        12px;
+
+    font-size:
+        15px;
+}
+
+.primary {
+
+    width:
+        100%;
+
+    background:
+        #111827;
+
+    color:
+        white;
+
+    margin-top:
+        20px;
+
+    padding:
+        14px;
+}
+
+.payment-summary {
+
+    background:
+        #f6f7f9;
+
+    border-radius:
+        13px;
+
+    padding:
+        15px;
+
+    margin-top:
+        15px;
+}
+
+.payment-option {
+
+    border:
+        1px solid #ddd;
+
+    border-radius:
+        11px;
+
+    padding:
+        12px;
+
+    margin-top:
+        8px;
+
+    cursor:
+        pointer;
+}
+
+.payment-option.selected {
+
+    border:
+        2px solid #111827;
+
+    background:
+        #f8f9fa;
+}
+
+.success {
+
+    text-align:
+        center;
+
+    padding:
+        20px;
+}
+
+.success-icon {
+
+    width:
+        70px;
+
+    height:
+        70px;
+
+    margin:
+        auto;
+
+    border-radius:
+        50%;
+
+    background:
+        #e9f8ef;
+
+    color:
+        #16803c;
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    font-size:
+        35px;
+
+    font-weight:
+        800;
+}
+
+.booking-detail {
+
+    background:
+        #f7f8fa;
+
+    border-radius:
+        13px;
+
+    padding:
+        15px;
+
+    text-align:
+        left;
+
+    margin-top:
+        18px;
+}
+
+.booking-row {
+
+    display:
+        flex;
+
+    justify-content:
+        space-between;
+
+    gap:
+        15px;
+
+    padding:
+        9px 0;
+
+    border-bottom:
+        1px solid #e5e5e5;
+
+    font-size:
+        14px;
+}
+
+.booking-row:last-child {
+
+    border-bottom:
+        none;
+}
+
+.badge {
+
+    display:
+        inline-block;
+
+    background:
+        #e8f7ed;
+
+    color:
+        #16803c;
+
+    padding:
+        5px 10px;
+
+    border-radius:
+        20px;
+
+    font-weight:
+        700;
+
+    font-size:
+        12px;
+}
+
+.demo {
+
+    margin-top:
+        15px;
+
+    padding:
+        12px;
+
+    background:
+        #fff6d9;
+
+    border:
+        1px solid #f1d77c;
+
+    border-radius:
+        10px;
+
+    font-size:
+        12px;
+
+}
+
+.typing {
+
+    color:
+        #777;
+
+    font-size:
+        13px;
+
+}
+
+@keyframes fadeIn {
+
+    from {
+        opacity: 0;
+        transform: translateY(5px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@media(max-width:600px) {
+
+    .message {
+        max-width: 94%;
+    }
+
+    .composer-inner {
+        gap: 7px;
+    }
+
+    .send {
+        min-width: 65px;
+    }
+
+    .header {
+        padding: 15px;
+    }
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="header">
+
+    <div class="logo">
+        🤖 AI Booking Agent
+    </div>
+
+    <div class="status">
+        ● Demo Online
+    </div>
+
+</div>
+
+
+<div class="container">
+
+    <div id="chat" class="chat">
+
+        <div class="message bot">
+
+            <div class="agent">
+                🤖 Universal Booking Agent
+            </div>
+
+            Hello! I can help you book a restaurant.
+
+            <br><br>
+
+            You can simply say:
+
+            <br><br>
+
+            <b>
+            "I want to book a restaurant"
+            </b>
+
+            or
+
+            <b>
+            "Tonight in Banjara Hills book BBQ for 4 people non veg"
+            </b>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<div class="composer">
+
+    <div class="composer-inner">
+
+        <input
+            id="messageInput"
+            type="text"
+            placeholder="Tell me what you want to book..."
+            autocomplete="off"
+        >
+
+        <button
+            class="send"
+            id="sendButton"
+            type="button"
+        >
+            Send
+        </button>
+
+    </div>
+
+</div>
+
+
+<!-- ===================================================== -->
+<!-- BOOKING MODAL -->
+<!-- ===================================================== -->
+
+<div id="bookingModal" class="modal">
+
+    <div class="modal-box">
+
+        <div class="modal-header">
+
+            <h2>📝 Booking Details</h2>
+
+            <button
+                class="close"
+                type="button"
+                onclick="closeModal('bookingModal')"
+            >
+                ×
+            </button>
+
+        </div>
+
+        <div id="selectedRestaurant"></div>
+
+        <div class="form-group">
+
+            <label>Full Name *</label>
+
+            <input
+                id="customerName"
+                placeholder="Enter your full name"
+            >
+
+        </div>
+
+        <div class="form-group">
+
+            <label>Phone Number *</label>
+
+            <input
+                id="customerPhone"
+                placeholder="Enter phone number"
+            >
+
+        </div>
+
+        <div class="form-group">
+
+            <label>Email</label>
+
+            <input
+                id="customerEmail"
+                placeholder="Enter email address"
+            >
+
+        </div>
+
+        <div class="form-group">
+
+            <label>Special Request</label>
+
+            <textarea
+                id="specialRequest"
+                rows="3"
+                placeholder="Window seat, birthday, etc."
+            ></textarea>
+
+        </div>
+
+        <button
+            class="primary"
+            type="button"
+            onclick="saveCustomerDetails()"
+        >
+            Continue to Payment →
+        </button>
+
+    </div>
+
+</div>
+
+
+<!-- ===================================================== -->
+<!-- PAYMENT MODAL -->
+<!-- ===================================================== -->
+
+<div id="paymentModal" class="modal">
+
+    <div class="modal-box">
+
+        <div class="modal-header">
+
+            <h2>💳 Demo Payment</h2>
+
+            <button
+                class="close"
+                type="button"
+                onclick="closeModal('paymentModal')"
+            >
+                ×
+            </button>
+
+        </div>
+
+        <div class="payment-summary">
+
+            <b>Restaurant Booking</b>
+
+            <br><br>
+
+            Booking Amount
+
+            <strong style="float:right">
+                ₹2,000
+            </strong>
+
+        </div>
+
+        <br>
+
+        <b>Select Payment Method</b>
+
+        <div
+            class="payment-option selected"
+            data-method="UPI"
+            onclick="selectPayment(this)"
+        >
+            📱 UPI
+        </div>
+
+        <div
+            class="payment-option"
+            data-method="Card"
+            onclick="selectPayment(this)"
+        >
+            💳 Credit / Debit Card
+        </div>
+
+        <div
+            class="payment-option"
+            data-method="Net Banking"
+            onclick="selectPayment(this)"
+        >
+            🏦 Net Banking
+        </div>
+
+        <button
+            class="primary"
+            type="button"
+            onclick="makePayment()"
+        >
+            💳 Pay ₹2,000 — Demo
+        </button>
+
+        <div class="demo">
+
+            🧪 <b>Demo Payment</b>
+
+            <br>
+
+            No real money will be charged.
+            This only simulates a successful payment.
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- ===================================================== -->
+<!-- CONFIRMATION MODAL -->
+<!-- ===================================================== -->
+
+<div id="confirmationModal" class="modal">
+
+    <div class="modal-box">
+
+        <div id="confirmationContent"></div>
+
+    </div>
+
+</div>
+
+
+<script>
+
+let sessionId =
+    "SESSION-" +
+    Date.now() +
+    "-" +
+    Math.floor(Math.random() * 100000);
+
+let selectedRestaurant = null;
+
+let selectedPaymentMethod = "UPI";
+
+
+const chat =
+    document.getElementById("chat");
+
+const input =
+    document.getElementById("messageInput");
+
+const sendButton =
+    document.getElementById("sendButton");
+
+
+// =========================================================
+// ADD MESSAGE
+// =========================================================
+
+function addMessage(text, type, agent="") {
+
+    const div =
+        document.createElement("div");
+
+    div.className =
+        "message " + type;
+
+    if (type === "bot") {
+
+        div.innerHTML =
+
+            (agent
+                ? `<div class="agent">🤖 ${agent}</div>`
+                : "") +
+
+            text;
+
+    } else {
+
+        div.innerHTML =
+            text;
+
+    }
+
+    chat.appendChild(div);
+
+    window.scrollTo({
+        top: document.body.scrollHeight,
+        behavior: "smooth"
+    });
+}
+
+
+// =========================================================
+// SEND MESSAGE
+// =========================================================
+
+async function sendMessage() {
+
+    const message =
+        input.value.trim();
+
+    if (!message)
+        return;
+
+    addMessage(
+        message,
+        "user"
+    );
+
+    input.value = "";
+
+    addMessage(
+        '<span class="typing">AI Agent is thinking...</span>',
+        "bot"
+    );
+
+    const typingMessage =
+        chat.lastElementChild;
+
+    try {
+
+        const response =
+            await fetch("/chat", {
+
+                method: "POST",
+
+                headers: {
+                    "Content-Type":
+                        "application/json"
+                },
+
+                body: JSON.stringify({
+
+                    session_id:
+                        sessionId,
+
+                    message:
+                        message
+                })
+
+            });
+
+        const data =
+            await response.json();
+
+        typingMessage.remove();
+
+        processResponse(data);
+
+    } catch(error) {
+
+        typingMessage.remove();
+
+        addMessage(
+            "⚠️ Connection error. Please try again.",
+            "bot",
+            "System"
+        );
+
+        console.error(error);
+    }
+}
+
+
+sendButton.addEventListener(
+    "click",
+    sendMessage
+);
+
+
+input.addEventListener(
+    "keydown",
+    function(event) {
+
+        if (event.key === "Enter") {
+
+            event.preventDefault();
+
+            sendMessage();
+        }
+
+    }
+);
+
+
+// =========================================================
+// PROCESS RESPONSE
+// =========================================================
+
+function processResponse(data) {
+
+    if (data.type === "question") {
+
+        let html =
+            data.message;
+
+        if (data.suggestions) {
+
+            html +=
+                '<div class="quick">';
+
+            data.suggestions.forEach(
+                function(item) {
+
+                    html += `
+                        <button
+                            type="button"
+                            onclick="quickAnswer('${item}')"
+                        >
+                            ${item}
+                        </button>
+                    `;
+
+                }
+            );
+
+            html +=
+                "</div>";
+        }
+
+        addMessage(
+            html,
+            "bot",
+            data.agent
+        );
+
+    }
+
+    else if (data.type === "results") {
+
+        let html =
+            data.message;
+
+        const d =
+            data.details;
+
+        html += `
+
+            <div class="detail-box">
+
+                <div class="detail">
+                    <small>📍 Location</small>
+                    <strong>${d.location}</strong>
+                </div>
+
+                <div class="detail">
+                    <small>📅 Date</small>
+                    <strong>${d.date}</strong>
+                </div>
+
+                <div class="detail">
+                    <small>🕐 Time</small>
+                    <strong>${d.time}</strong>
+                </div>
+
+                <div class="detail">
+                    <small>👥 Guests</small>
+                    <strong>${d.guests}</strong>
+                </div>
+
+                <div class="detail">
+                    <small>🍽️ Preference</small>
+                    <strong>${d.preference}</strong>
+                </div>
+
+            </div>
+
+        `;
+
+        html +=
+            '<div class="restaurant-grid">';
+
+        data.results.forEach(
+            function(r) {
+
+                html += `
+
+                    <div class="restaurant-card">
+
+                        <h3>
+                            🍽️ ${r.name}
+                        </h3>
+
+                        <div class="meta">
+                            📍 ${r.location},
+                            ${r.city}
+                        </div>
+
+                        <div class="meta">
+                            🍴 ${r.cuisine}
+                        </div>
+
+                        <div class="meta">
+                            ⭐ ${r.rating}
+                            &nbsp;&nbsp;
+                            ${r.price}
+                        </div>
+
+                        <div class="meta">
+                            🕐 ${r.timings}
+                        </div>
+
+                        <button
+                            class="book-btn"
+                            type="button"
+                            onclick='openBooking(${JSON.stringify(r)})'
+                        >
+                            Book Now →
+                        </button>
+
+                    </div>
+
+                `;
+
+            }
+        );
+
+        html +=
+            "</div>";
+
+        addMessage(
+            html,
+            "bot",
+            data.agent
+        );
+
+    }
+
+    else {
+
+        addMessage(
+            data.message || "Done.",
+            "bot",
+            data.agent || "AI Agent"
+        );
+    }
+}
+
+
+// =========================================================
+// QUICK ANSWER
+// =========================================================
+
+function quickAnswer(value) {
+
+    input.value =
+        value;
+
+    sendMessage();
+}
+
+
+// =========================================================
+// OPEN BOOKING
+// =========================================================
+
+function openBooking(restaurant) {
+
+    selectedRestaurant =
+        restaurant;
+
+    document.getElementById(
+        "selectedRestaurant"
+    ).innerHTML = `
+
+        <div class="payment-summary">
+
+            <b>${restaurant.name}</b>
+
+            <br>
+
+            📍 ${restaurant.location},
+            ${restaurant.city}
+
+            <br>
+
+            ⭐ ${restaurant.rating}
+
+        </div>
+
+    `;
+
+    document.getElementById(
+        "bookingModal"
+    ).classList.add("show");
+}
+
+
+// =========================================================
+// CLOSE MODAL
+// =========================================================
+
+function closeModal(id) {
+
+    document.getElementById(id)
+        .classList.remove("show");
+}
+
+
+// =========================================================
+// CUSTOMER DETAILS
+// =========================================================
+
+async function saveCustomerDetails() {
+
+    const name =
+        document.getElementById(
+            "customerName"
+        ).value.trim();
+
+    const phone =
+        document.getElementById(
+            "customerPhone"
+        ).value.trim();
+
+    const email =
+        document.getElementById(
+            "customerEmail"
+        ).value.trim();
+
+    const specialRequest =
+        document.getElementById(
+            "specialRequest"
+        ).value.trim();
+
+
+    if (!name) {
+
+        alert(
+            "Please enter your full name."
+        );
+
+        return;
+    }
+
+    if (!phone) {
+
+        alert(
+            "Please enter your phone number."
+        );
+
+        return;
+    }
+
+
+    try {
+
+        const response =
+            await fetch(
+                "/customer-details",
+                {
+
+                    method:
+                        "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body:
+                        JSON.stringify({
+
+                            session_id:
+                                sessionId,
+
+                            name:
+                                name,
+
+                            phone:
+                                phone,
+
+                            email:
+                                email,
+
+                            special_request:
+                                specialRequest
+
+                        })
+
+                }
+            );
+
+        const data =
+            await response.json();
+
+
+        if (!data.success) {
+
+            alert(
+                data.message
+            );
+
+            return;
+        }
+
+
+        closeModal(
+            "bookingModal"
+        );
+
+        document.getElementById(
+            "paymentModal"
+        ).classList.add("show");
+
+
+    } catch(error) {
+
+        alert(
+            "Unable to continue. Please try again."
+        );
+
+        console.error(error);
+    }
+}
+
+
+// =========================================================
+// PAYMENT METHOD
+// =========================================================
+
+function selectPayment(element) {
+
+    document
+        .querySelectorAll(
+            ".payment-option"
+        )
+        .forEach(
+            function(item) {
+
+                item.classList.remove(
+                    "selected"
+                );
+
+            }
+        );
+
+    element.classList.add(
+        "selected"
+    );
+
+    selectedPaymentMethod =
+        element.dataset.method;
+}
+
+
+// =========================================================
+// MAKE PAYMENT
+// =========================================================
+
+async function makePayment() {
+
+    try {
+
+        const response =
+            await fetch(
+                "/payment",
+                {
+
+                    method:
+                        "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body:
+                        JSON.stringify({
+
+                            session_id:
+                                sessionId,
+
+                            method:
+                                selectedPaymentMethod
+
+                        })
+
+                }
+            );
+
+        const data =
+            await response.json();
+
+
+        if (!data.success) {
+
+            alert(
+                data.message
+            );
+
+            return;
+        }
+
+
+        closeModal(
+            "paymentModal"
+        );
+
+
+        await confirmBooking();
+
+
+    } catch(error) {
+
+        alert(
+            "Payment failed."
+        );
+
+        console.error(error);
+    }
+}
+
+
+// =========================================================
+// FINAL CONFIRMATION
+// =========================================================
+
+async function confirmBooking() {
+
+    try {
+
+        const response =
+            await fetch(
+                "/confirm-booking",
+                {
+
+                    method:
+                        "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body:
+                        JSON.stringify({
+
+                            session_id:
+                                sessionId
+
+                        })
+
+                }
+            );
+
+        const data =
+            await response.json();
+
+
+        if (!data.success) {
+
+            alert(
+                data.message
+            );
+
+            return;
+        }
+
+
+        const b =
+            data.booking;
+
+        const c =
+            b.customer;
+
+        const p =
+            b.payment;
+
+
+        document.getElementById(
+            "confirmationContent"
+        ).innerHTML = `
+
+            <div class="success">
+
+                <div class="success-icon">
+                    ✓
+                </div>
+
+                <h2>
+                    Booking Confirmed
+                </h2>
+
+                <span class="badge">
+                    CONFIRMED
+                </span>
+
+                <div class="booking-detail">
+
+                    <div class="booking-row">
+                        <span>Restaurant</span>
+                        <b>${b.restaurant}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Location</span>
+                        <b>${b.location}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Date</span>
+                        <b>${b.date}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Time</span>
+                        <b>${b.time}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Guests</span>
+                        <b>${b.guests}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Preference</span>
+                        <b>${b.preference}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Name</span>
+                        <b>${c.name}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Phone</span>
+                        <b>${c.phone}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Payment</span>
+                        <b>
+                            ₹${p.amount}
+                            — ${p.status}
+                        </b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Transaction ID</span>
+                        <b>${p.transaction_id}</b>
+                    </div>
+
+                    <div class="booking-row">
+                        <span>Booking ID</span>
+                        <b>${b.booking_id}</b>
+                    </div>
+
+                </div>
+
+                <div class="demo">
+
+                    🧪 <b>DEMO BOOKING</b>
+
+                    <br><br>
+
+                    This booking was generated
+                    using the local sample database.
+
+                    <br>
+
+                    No real restaurant reservation
+                    was created.
+
+                    <br>
+
+                    No real money was charged.
+
+                </div>
+
+                <button
+                    class="primary"
+                    type="button"
+                    onclick="closeModal('confirmationModal')"
+                >
+                    Done
+                </button>
+
+            </div>
+
+        `;
+
+
+        document.getElementById(
+            "confirmationModal"
+        ).classList.add("show");
+
+
+    } catch(error) {
+
+        alert(
+            "Unable to confirm booking."
+        );
+
+        console.error(error);
+    }
+}
+
+</script>
+
+</body>
+
+</html>
+"""
+
+
+# ============================================================
+# HOME ROUTE
+# ============================================================
+
+@app.route("/")
+def home():
+
+    return render_template_string(
+        HTML
+    )
+
+
+# ============================================================
+# START SERVER
+# ============================================================
+
+def run_server():
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=False,
+        use_reloader=False
+    )
+
+
+server_thread = threading.Thread(
+    target=run_server,
+    daemon=True
+)
+
+server_thread.start()
+
+time.sleep(2)
+
+print("=" * 70)
+print("🤖 ADVANCED AI RESTAURANT BOOKING AGENT")
+print("=" * 70)
+print("Framework : Flask")
+print("Frontend  : HTML + CSS + JavaScript")
+print("Gradio    : NOT USED")
+print("API       : NOT USED")
+print("Payment   : SAMPLE ONLY")
+print("Booking   : SAMPLE ONLY")
+print("=" * 70)
+
+
+# ============================================================
+# COLAB PUBLIC URL
+# ============================================================
+
+from google.colab.output import eval_js
+
+try:
+
+    public_url = eval_js(
+        "google.colab.kernel.proxyPort(5000)"
+    )
+
+    print("\n🌐 OPEN YOUR CHATBOT:")
+    print(public_url)
+
+except Exception as e:
+
+    print(
+        "\nCould not create Colab proxy URL."
+    )
+
+    print(
+        "Open http://localhost:5000 if running locally."
+    )

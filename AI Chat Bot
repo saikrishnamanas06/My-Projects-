@@ -1,0 +1,813 @@
+# ============================================================
+# 🤖 LOCAL CHATGPT-STYLE AI CHATBOT
+# GOOGLE COLAB - SINGLE CELL
+# NO API KEY
+# NO src FOLDER
+# ============================================================
+
+# ------------------------------------------------------------
+# 1. INSTALL
+# ------------------------------------------------------------
+
+!pip -q install -U transformers accelerate sentencepiece ipywidgets
+
+
+# ------------------------------------------------------------
+# 2. IMPORTS
+# ------------------------------------------------------------
+
+import torch
+import warnings
+import html
+
+warnings.filterwarnings("ignore")
+
+import ipywidgets as widgets
+
+from IPython.display import display, HTML, Markdown
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM
+)
+
+
+# ------------------------------------------------------------
+# 3. CONFIGURATION
+# ------------------------------------------------------------
+
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+MAX_NEW_TOKENS = 500
+
+TEMPERATURE = 0.7
+
+TOP_P = 0.9
+
+
+# ------------------------------------------------------------
+# 4. GPU CHECK
+# ------------------------------------------------------------
+
+print("=" * 65)
+print("🤖 LOCAL AI CHATBOT")
+print("=" * 65)
+
+if torch.cuda.is_available():
+
+    DEVICE = "cuda"
+
+    print("✅ GPU Available")
+    print("GPU:", torch.cuda.get_device_name(0))
+
+else:
+
+    DEVICE = "cpu"
+
+    print("⚠️ GPU not available")
+    print("The chatbot will run on CPU.")
+
+print()
+
+
+# ------------------------------------------------------------
+# 5. LOAD TOKENIZER
+# ------------------------------------------------------------
+
+print("📥 Loading tokenizer...")
+
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_NAME
+)
+
+print("✅ Tokenizer loaded")
+
+
+# ------------------------------------------------------------
+# 6. LOAD MODEL
+# ------------------------------------------------------------
+
+print("📥 Loading AI model...")
+print("Model:", MODEL_NAME)
+
+if DEVICE == "cuda":
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+
+else:
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.float32
+    )
+
+    model.to("cpu")
+
+
+model.eval()
+
+print("✅ Model loaded")
+print()
+
+
+# ------------------------------------------------------------
+# 7. SYSTEM PROMPT
+# ------------------------------------------------------------
+
+SYSTEM_PROMPT = """
+You are a helpful, intelligent and friendly general-purpose AI assistant.
+
+You can help with:
+
+- General questions
+- Python
+- SQL
+- Programming
+- Data Science
+- Machine Learning
+- Artificial Intelligence
+- Statistics
+- Mathematics
+- Technology
+- Coding
+- Debugging
+- Project development
+- Writing
+- Rewriting
+- Summarization
+- Translation
+- Education
+- Business
+- Career questions
+- Technical explanations
+- Creative tasks
+
+Instructions:
+
+1. Understand the user's question carefully.
+
+2. Give accurate and useful answers.
+
+3. Explain difficult concepts in simple language.
+
+4. Provide examples when useful.
+
+5. For programming questions, provide working code.
+
+6. For debugging questions, explain the error and provide
+   corrected code.
+
+7. Use Markdown formatting when useful.
+
+8. Use headings, bullet points and numbered lists when useful.
+
+9. Keep answers reasonably concise unless the user asks
+   for a detailed explanation.
+
+10. If the user asks for complete code, provide complete code.
+
+11. Do not unnecessarily repeat the question.
+
+12. Do not invent information.
+
+13. If you do not know something, say that you do not know.
+
+14. Maintain the conversation context.
+
+15. Be friendly and professional.
+
+16. Adapt your explanation to the user's level.
+
+You are a general-purpose AI assistant.
+"""
+
+
+# ------------------------------------------------------------
+# 8. CONVERSATION
+# ------------------------------------------------------------
+
+conversation = [
+    {
+        "role": "system",
+        "content": SYSTEM_PROMPT
+    }
+]
+
+
+# ------------------------------------------------------------
+# 9. MESSAGE COUNTER
+# ------------------------------------------------------------
+
+message_count = 0
+
+
+# ------------------------------------------------------------
+# 10. GENERATE RESPONSE
+# ------------------------------------------------------------
+
+def generate_response(user_message):
+
+    global conversation
+
+    user_message = user_message.strip()
+
+    if not user_message:
+
+        return "Please enter a message."
+
+    conversation.append(
+        {
+            "role": "user",
+            "content": user_message
+        }
+    )
+
+    try:
+
+        # Create chat prompt
+        prompt = tokenizer.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        # Tokenize
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt"
+        )
+
+        # Move to device
+        if DEVICE == "cuda":
+
+            inputs = {
+                key: value.to("cuda")
+                for key, value in inputs.items()
+            }
+
+        else:
+
+            inputs = {
+                key: value.to("cpu")
+                for key, value in inputs.items()
+            }
+
+        # Generate
+        with torch.no_grad():
+
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=MAX_NEW_TOKENS,
+                do_sample=True,
+                temperature=TEMPERATURE,
+                top_p=TOP_P,
+                repetition_penalty=1.1,
+                pad_token_id=tokenizer.eos_token_id
+            )
+
+        # Get newly generated tokens
+        input_length = inputs["input_ids"].shape[1]
+
+        generated_tokens = outputs[
+            0,
+            input_length:
+        ]
+
+        # Decode
+        answer = tokenizer.decode(
+            generated_tokens,
+            skip_special_tokens=True
+        ).strip()
+
+        if not answer:
+
+            answer = "I couldn't generate a response."
+
+        # Save response
+        conversation.append(
+            {
+                "role": "assistant",
+                "content": answer
+            }
+        )
+
+        return answer
+
+    except Exception as error:
+
+        # Remove failed user message
+        if (
+            len(conversation) > 1
+            and conversation[-1]["role"] == "user"
+        ):
+
+            conversation.pop()
+
+        return "⚠️ Error: " + str(error)
+
+
+# ------------------------------------------------------------
+# 11. CHAT OUTPUT
+# ------------------------------------------------------------
+
+chat_output = widgets.Output(
+    layout=widgets.Layout(
+        width="100%",
+        height="450px",
+        overflow="auto",
+        border="1px solid #dddddd",
+        padding="15px",
+        margin="10px 0"
+    )
+)
+
+
+# ------------------------------------------------------------
+# 12. MESSAGE BOX
+# ------------------------------------------------------------
+
+message_box = widgets.Textarea(
+    placeholder="Message AI...",
+    layout=widgets.Layout(
+        width="85%",
+        height="75px"
+    )
+)
+
+
+# ------------------------------------------------------------
+# 13. SEND BUTTON
+# ------------------------------------------------------------
+
+send_button = widgets.Button(
+    description="Send",
+    icon="paper-plane",
+    button_style="primary",
+    layout=widgets.Layout(
+        width="100px",
+        height="38px"
+    )
+)
+
+
+# ------------------------------------------------------------
+# 14. CLEAR BUTTON
+# ------------------------------------------------------------
+
+clear_button = widgets.Button(
+    description="Clear",
+    icon="trash",
+    button_style="warning",
+    layout=widgets.Layout(
+        width="100px",
+        height="38px"
+    )
+)
+
+
+# ------------------------------------------------------------
+# 15. STATUS
+# ------------------------------------------------------------
+
+counter = widgets.HTML(
+    value="<b>Messages:</b> 0"
+)
+
+status = widgets.HTML(
+    value="""
+    <span style="color:green;font-weight:bold;">
+        ● Local AI Online
+    </span>
+    """
+)
+
+
+# ------------------------------------------------------------
+# 16. DISPLAY USER MESSAGE
+# ------------------------------------------------------------
+
+def show_user_message(message):
+
+    safe_message = html.escape(message)
+
+    with chat_output:
+
+        display(
+            HTML(
+                f"""
+                <div style="
+                    background:#eef2ff;
+                    padding:14px;
+                    border-radius:12px;
+                    margin:10px 0;
+                    border-left:4px solid #4f46e5;
+                ">
+
+                    <div style="
+                        font-weight:bold;
+                        color:#4338ca;
+                        margin-bottom:8px;
+                    ">
+                        👤 You
+                    </div>
+
+                    <div style="
+                        white-space:pre-wrap;
+                        color:#222;
+                    ">
+                        {safe_message}
+                    </div>
+
+                </div>
+                """
+            )
+        )
+
+
+# ------------------------------------------------------------
+# 17. DISPLAY AI RESPONSE
+# ------------------------------------------------------------
+
+def show_ai_message(message):
+
+    with chat_output:
+
+        display(
+            HTML(
+                """
+                <div style="
+                    background:#f8fafc;
+                    padding:14px;
+                    border-radius:12px;
+                    margin:10px 0 5px 0;
+                    border-left:4px solid #64748b;
+                ">
+
+                    <div style="
+                        font-weight:bold;
+                        color:#334155;
+                        margin-bottom:8px;
+                    ">
+                        🤖 AI Assistant
+                    </div>
+
+                </div>
+                """
+            )
+        )
+
+        display(
+            Markdown(message)
+        )
+
+
+# ------------------------------------------------------------
+# 18. SEND MESSAGE
+# ------------------------------------------------------------
+
+def send_message(button=None):
+
+    global message_count
+
+    question = message_box.value.strip()
+
+    if not question:
+
+        return
+
+    message_box.value = ""
+
+    send_button.disabled = True
+
+    show_user_message(question)
+
+    with chat_output:
+
+        loading = HTML(
+            """
+            <div style="
+                padding:10px;
+                color:#64748b;
+                font-style:italic;
+            ">
+                🤖 AI is thinking...
+            </div>
+            """
+        )
+
+        display(loading)
+
+    try:
+
+        answer = generate_response(
+            question
+        )
+
+        show_ai_message(answer)
+
+        message_count += 1
+
+        counter.value = (
+            "<b>Messages:</b> "
+            + str(message_count)
+        )
+
+    except Exception as error:
+
+        show_ai_message(
+            "⚠️ Error: " + str(error)
+        )
+
+    finally:
+
+        send_button.disabled = False
+
+
+# ------------------------------------------------------------
+# 19. CLEAR CHAT
+# ------------------------------------------------------------
+
+def clear_chat(button=None):
+
+    global conversation
+    global message_count
+
+    conversation = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        }
+    ]
+
+    message_count = 0
+
+    counter.value = "<b>Messages:</b> 0"
+
+    chat_output.clear_output()
+
+    with chat_output:
+
+        display(
+            Markdown(
+                """
+## 👋 Hello!
+
+I'm your local AI assistant.
+
+Ask me anything about:
+
+- Python
+- SQL
+- AI / ML
+- Data Science
+- Programming
+- Mathematics
+- Technology
+- Writing
+- Education
+- Projects
+- General questions
+
+**What would you like to know?**
+"""
+            )
+        )
+
+
+# ------------------------------------------------------------
+# 20. EXAMPLE BUTTON
+# ------------------------------------------------------------
+
+def use_example(button):
+
+    message_box.value = button.description
+
+
+# ------------------------------------------------------------
+# 21. EXAMPLE QUESTIONS
+# ------------------------------------------------------------
+
+example1 = widgets.Button(
+    description="Explain Python decorators",
+    layout=widgets.Layout(
+        width="210px"
+    )
+)
+
+example2 = widgets.Button(
+    description="Explain SQL JOIN",
+    layout=widgets.Layout(
+        width="180px"
+    )
+)
+
+example3 = widgets.Button(
+    description="What is Machine Learning?",
+    layout=widgets.Layout(
+        width="210px"
+    )
+)
+
+example4 = widgets.Button(
+    description="Give me a Python project idea",
+    layout=widgets.Layout(
+        width="230px"
+    )
+)
+
+
+example1.on_click(use_example)
+
+example2.on_click(use_example)
+
+example3.on_click(use_example)
+
+example4.on_click(use_example)
+
+
+# ------------------------------------------------------------
+# 22. CONNECT BUTTONS
+# ------------------------------------------------------------
+
+send_button.on_click(send_message)
+
+clear_button.on_click(clear_chat)
+
+
+# ------------------------------------------------------------
+# 23. HEADER
+# ------------------------------------------------------------
+
+header = HTML(
+    """
+    <div style="
+        background:linear-gradient(
+            135deg,
+            #111827,
+            #374151
+        );
+        color:white;
+        padding:28px;
+        border-radius:16px;
+        text-align:center;
+        margin-bottom:15px;
+    ">
+
+        <div style="font-size:45px;">
+            🤖
+        </div>
+
+        <h1 style="
+            margin:0;
+            font-size:32px;
+        ">
+            AI Assistant
+        </h1>
+
+        <p style="
+            margin:8px 0 0 0;
+            font-size:16px;
+        ">
+            General-Purpose Local AI Chatbot
+        </p>
+
+        <p style="
+            margin:8px 0 0 0;
+            font-size:12px;
+            opacity:0.8;
+        ">
+            Qwen 2.5 • No API Key Required
+        </p>
+
+    </div>
+    """
+)
+
+
+# ------------------------------------------------------------
+# 24. INPUT AREA
+# ------------------------------------------------------------
+
+input_area = widgets.HBox(
+    [
+        message_box,
+
+        widgets.VBox(
+            [
+                send_button,
+                clear_button
+            ]
+        )
+    ]
+)
+
+
+# ------------------------------------------------------------
+# 25. EXAMPLE TITLE
+# ------------------------------------------------------------
+
+example_title = HTML(
+    """
+    <h4 style="margin:15px 0 8px 0;">
+        💡 Try asking
+    </h4>
+    """
+)
+
+
+# ------------------------------------------------------------
+# 26. EXAMPLES
+# ------------------------------------------------------------
+
+examples = widgets.HBox(
+    [
+        example1,
+        example2,
+        example3,
+        example4
+    ]
+)
+
+
+# ------------------------------------------------------------
+# 27. DISPLAY APPLICATION
+# ------------------------------------------------------------
+
+display(header)
+
+display(
+    widgets.HBox(
+        [
+            counter,
+            widgets.HTML("&nbsp;&nbsp;&nbsp;"),
+            status
+        ]
+    )
+)
+
+display(chat_output)
+
+display(input_area)
+
+display(example_title)
+
+display(examples)
+
+
+# ------------------------------------------------------------
+# 28. INITIAL MESSAGE
+# ------------------------------------------------------------
+
+with chat_output:
+
+    display(
+        Markdown(
+            """
+## 👋 Welcome to your AI Assistant
+
+You can ask me **almost anything**.
+
+### 💻 Programming
+
+`Explain Python list comprehensions`
+
+### 🗄️ SQL
+
+`Explain INNER JOIN with an example`
+
+### 🤖 AI / ML
+
+`What is the difference between ML and Deep Learning?`
+
+### 📊 Data Science
+
+`Explain Pandas DataFrame`
+
+### ✍️ Writing
+
+`Write a professional internship email`
+
+### 🚀 Projects
+
+`Give me an AI project idea`
+
+---
+
+**Type your message below and click Send.**
+"""
+        )
+    )
+
+
+# ------------------------------------------------------------
+# 29. READY
+# ------------------------------------------------------------
+
+print()
+print("=" * 65)
+print("✅ CHATBOT READY")
+print("=" * 65)

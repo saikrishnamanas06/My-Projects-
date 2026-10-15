@@ -1,0 +1,439 @@
+!pip install -q diffusers transformers accelerate safetensors sentencepiece
+
+import torch
+from diffusers import StableDiffusionPipeline
+from IPython.display import display
+from google.colab import files
+import ipywidgets as widgets
+from IPython.display import clear_output
+
+
+# ============================================================
+# CHECK GPU
+# ============================================================
+
+if not torch.cuda.is_available():
+
+    print("❌ GPU not detected.")
+    print()
+    print("In Google Colab:")
+    print("Runtime → Change runtime type → T4 GPU")
+
+else:
+
+    print("✅ GPU:", torch.cuda.get_device_name(0))
+
+
+# ============================================================
+# LOAD AI MODEL
+# ============================================================
+
+MODEL_ID = "runwayml/stable-diffusion-v1-5"
+
+print("\nLoading AI model...")
+print("Please wait...")
+
+pipe = StableDiffusionPipeline.from_pretrained(
+    MODEL_ID,
+    torch_dtype=torch.float16
+)
+
+pipe = pipe.to("cuda")
+
+# Reduce GPU memory usage
+pipe.enable_attention_slicing()
+
+# ============================================================
+# VARIABLES
+# ============================================================
+
+generated_image = None
+
+
+# ============================================================
+# PROMPT BOX
+# ============================================================
+
+prompt_box = widgets.Textarea(
+    value="",
+    placeholder=(
+        "Describe the picture you want...\n\n"
+        "Example:\n"
+        "A beautiful modern house surrounded by a green garden"
+    ),
+    description="Prompt:",
+    layout=widgets.Layout(
+        width="850px",
+        height="160px"
+    ),
+    style={
+        "description_width": "80px"
+    }
+)
+
+
+# ============================================================
+# NEGATIVE PROMPT
+# ============================================================
+
+negative_box = widgets.Textarea(
+    value=(
+        "blurry, low quality, distorted, deformed, "
+        "duplicate, bad anatomy, cropped, watermark, "
+        "text, logo"
+    ),
+    description="Avoid:",
+    layout=widgets.Layout(
+        width="850px",
+        height="100px"
+    ),
+    style={
+        "description_width": "80px"
+    }
+)
+
+
+# ============================================================
+# IMAGE SIZE
+# ============================================================
+
+size_dropdown = widgets.Dropdown(
+    options=[
+        ("512 × 512", (512, 512)),
+        ("512 × 768", (512, 768)),
+        ("768 × 512", (768, 512)),
+    ],
+    value=(512, 512),
+    description="Size:",
+    style={
+        "description_width": "80px"
+    }
+)
+
+
+# ============================================================
+# GENERATION STEPS
+# ============================================================
+
+steps_slider = widgets.IntSlider(
+    value=30,
+    min=10,
+    max=50,
+    step=1,
+    description="Steps:",
+    continuous_update=False,
+    layout=widgets.Layout(
+        width="600px"
+    )
+)
+
+
+# ============================================================
+# GUIDANCE
+# ============================================================
+
+guidance_slider = widgets.FloatSlider(
+    value=7.5,
+    min=1,
+    max=15,
+    step=0.5,
+    description="Guidance:",
+    continuous_update=False,
+    layout=widgets.Layout(
+        width="600px"
+    )
+)
+
+
+# ============================================================
+# GENERATE BUTTON
+# ============================================================
+
+generate_button = widgets.Button(
+    description="Generate Image",
+    button_style="success",
+    icon="picture-o",
+    layout=widgets.Layout(
+        width="220px",
+        height="50px"
+    )
+)
+
+
+# ============================================================
+# DOWNLOAD BUTTON
+# ============================================================
+
+download_button = widgets.Button(
+    description="Download Image",
+    button_style="primary",
+    icon="download",
+    disabled=True,
+    layout=widgets.Layout(
+        width="220px",
+        height="50px"
+    )
+)
+
+
+# ============================================================
+# CLEAR BUTTON
+# ============================================================
+
+clear_button = widgets.Button(
+    description="Clear",
+    button_style="warning",
+    icon="trash",
+    layout=widgets.Layout(
+        width="150px",
+        height="50px"
+    )
+)
+
+
+# ============================================================
+# OUTPUT AREA
+# ============================================================
+
+output = widgets.Output(
+    layout=widgets.Layout(
+        width="850px"
+    )
+)
+
+
+# ============================================================
+# GENERATE IMAGE
+# ============================================================
+
+def generate_image(button):
+
+    global generated_image
+
+    prompt = prompt_box.value.strip()
+
+    if not prompt:
+
+        with output:
+
+            clear_output()
+
+            print("⚠️ Please enter a description.")
+
+        return
+
+
+    negative_prompt = negative_box.value.strip()
+
+    width, height = size_dropdown.value
+
+    steps = steps_slider.value
+
+    guidance = guidance_slider.value
+
+
+    with output:
+
+        clear_output()
+
+        print("⏳ Generating image...")
+        print()
+        print("Your Prompt:")
+        print(prompt)
+        print()
+        print("Please wait...")
+
+
+    try:
+
+        # ====================================================
+        # AI IMAGE GENERATION
+        # ====================================================
+
+        result = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            num_inference_steps=steps,
+            guidance_scale=guidance
+        )
+
+
+        generated_image = result.images[0]
+
+
+        # ====================================================
+        # SAVE IMAGE
+        # ====================================================
+
+        output_path = "/content/generated_image.png"
+
+        generated_image.save(output_path)
+
+
+        # ====================================================
+        # DISPLAY IMAGE
+        # ====================================================
+
+        with output:
+
+            clear_output()
+
+            print("✅ Image Generated Successfully!")
+            print()
+            print("Prompt:")
+            print(prompt)
+            print()
+            print(
+                f"Image Size: {width} × {height}"
+            )
+            print()
+
+            display(generated_image)
+
+
+        # Enable download
+        download_button.disabled = False
+
+
+    except Exception as e:
+
+        with output:
+
+            clear_output()
+
+            print("❌ Error while generating image:")
+            print()
+            print(str(e))
+
+
+# ============================================================
+# DOWNLOAD IMAGE
+# ============================================================
+
+def download_image(button):
+
+    global generated_image
+
+    if generated_image is None:
+
+        with output:
+
+            clear_output()
+
+            print("⚠️ Generate an image first.")
+
+        return
+
+
+    generated_image.save(
+        "/content/generated_image.png"
+    )
+
+    files.download(
+        "/content/generated_image.png"
+    )
+
+
+# ============================================================
+# CLEAR
+# ============================================================
+
+def clear_all(button):
+
+    global generated_image
+
+    generated_image = None
+
+    prompt_box.value = ""
+
+    with output:
+
+        clear_output()
+
+        print("🧹 Cleared.")
+
+    download_button.disabled = True
+
+
+# ============================================================
+# CONNECT BUTTONS
+# ============================================================
+
+generate_button.on_click(
+    generate_image
+)
+
+download_button.on_click(
+    download_image
+)
+
+clear_button.on_click(
+    clear_all
+)
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+title = widgets.HTML(
+    value="""
+    <div style="
+        width:810px;
+        padding:20px;
+        border-radius:12px;
+        background:#222;
+        color:white;
+        margin-bottom:20px;
+    ">
+
+        <h1 style="margin:0;">
+            🖼️ AI Text-to-Image Generator
+        </h1>
+
+        <p style="margin-top:10px;">
+            Describe anything and let AI generate the picture.
+        </p>
+
+    </div>
+    """
+)
+
+
+# ============================================================
+# DISPLAY APPLICATION
+# ============================================================
+
+display(
+
+    title,
+
+    prompt_box,
+
+    widgets.HTML("<br>"),
+
+    negative_box,
+
+    widgets.HTML("<br>"),
+
+    size_dropdown,
+
+    steps_slider,
+
+    guidance_slider,
+
+    widgets.HTML("<br>"),
+
+    widgets.HBox([
+        generate_button,
+        download_button,
+        clear_button
+    ]),
+
+    widgets.HTML("<br>"),
+
+    output
+)
+
